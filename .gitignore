@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+.python-version
+
+# uv
+uv.lock.bak
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Data / outputs (keep the repo code-only; sample docs go in examples/)
+data/raw/
+data/processed/
+outputs/
+*.jsonl
+
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
