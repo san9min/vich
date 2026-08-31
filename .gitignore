@@ -19,11 +19,12 @@ uv.lock.bak
 .env.*
 !.env.example
 
-# Data / outputs (keep the repo code-only; sample docs go in examples/)
+# Data / outputs (keep the repo code-only; examples/ commits its own fixtures)
 data/raw/
 data/processed/
 outputs/
 *.jsonl
+!examples/*.jsonl
 
 # Test / tooling caches
 .pytest_cache/

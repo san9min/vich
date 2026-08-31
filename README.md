@@ -72,12 +72,19 @@ Each chunk (see `vich.schema.Chunk`) carries a 3-level heading hierarchy,
 page range, content type, table markdown (when applicable), keywords,
 entities, and a precomposed `embedding_text` ready for a vector store.
 
+## Example
+
+See [`examples/`](examples/) for a worked example: a fictional 2-page PDF,
+the actual JSONL chunks vich produces from it, and a
+[chunk visualization page](examples/chunk_visualization.html) showing each
+source page next to the chunks extracted from it.
+
 ## Roadmap
 
 - [x] Port and generalize the VLM chunking pipeline (drop domain-specific
       bank/document data, keep the layout-aware chunking approach)
+- [x] Docs + example PDF walkthrough
 - [ ] Pluggable VLM backend (OpenAI-compatible today; others later)
-- [ ] Docs + example PDF walkthrough
 - [ ] Publish to PyPI
 
 ## License
