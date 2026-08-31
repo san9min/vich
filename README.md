@@ -138,8 +138,10 @@ disappears just because the model's own chunking missed it.
 See [`examples/`](examples/) for a worked example: a real academic PDF, the
 actual JSONL chunks vich produces from it, and a
 [chunk visualization page](examples/chunk_visualization.html) showing each
-source page with a box (and cropped image) for every chunk extracted from
-it, plus the document outline linking down to each one.
+source page with a box (and cropped image) for every chunk, colored by
+which section it belongs to (not by `content_type`) so the hierarchy is
+visible directly on the page, plus the document outline linking down to
+each one.
 
 ## Known limitations
 

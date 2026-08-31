@@ -5,6 +5,14 @@ image thumbnail of what each box covers, a card per chunk with its full
 text/table and metadata, and a document-wide heading outline (via
 vich.outline) linking down to each chunk.
 
+Color is used to show the heading hierarchy, not content_type: every
+distinct level_2 (falling back to level_1) heading gets its own color, so
+a page's boxes and a page's cards visually cluster by section -- matching
+the "hierarchical" half of what vich actually does. content_type still
+shows up as a text badge on each card, just not via color anymore. Cards
+within a page are additionally grouped (and visually bracketed) by their
+full level_2/level_3 heading pair.
+
 vich's chunks don't carry bounding boxes (the VLM reasons over the whole
 page image, not coordinates), so the box(es) for each chunk are *estimated*
 by matching the chunk's own text back onto the PDF's text layer (word by
@@ -38,11 +46,12 @@ Re-run after regenerating the example PDF or re-running `vich parse`:
 from __future__ import annotations
 
 import base64
+import colorsys
 import html
 import io
 import json
 import re
-from itertools import pairwise
+from itertools import groupby, pairwise
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -77,6 +86,57 @@ CONTENT_TYPE_COLORS = {
 def load_chunks(jsonl_path: Path) -> list[dict]:
     with jsonl_path.open(encoding="utf-8") as handle:
         return [json.loads(line) for line in handle if line.strip()]
+
+
+# ---------------------------------------------------------------------------
+# Heading-based color assignment: every distinct section gets its own color,
+# so boxes/cards visually cluster by where they sit in the document's
+# hierarchy rather than by their (separately badged) content_type.
+# ---------------------------------------------------------------------------
+
+
+def section_key(chunk: dict) -> str:
+    """The heading a chunk's color is grouped by: level_2, falling back to
+    level_1 for chunks with no section heading of their own."""
+    return chunk.get("level_2_heading") or chunk.get("level_1_heading") or "Untitled"
+
+
+def _heading_group_key(chunk: dict) -> tuple[str | None, str | None]:
+    """Finer-grained than section_key(): used to cluster cards within a
+    page, since two chunks can share a level_2 section but sit under
+    different level_3 subtopics."""
+    return (chunk.get("level_2_heading"), chunk.get("level_3_heading"))
+
+
+_GOLDEN_ANGLE = 0.6180339887498949  # 137.5..deg / 360, as a hue-wheel fraction
+
+
+def assign_section_colors(chunks: list[dict]) -> dict[str, str]:
+    """One color per distinct section_key(), in order of first appearance.
+
+    Adjacent *sections* in reading order are exactly the ones that end up
+    next to each other on a page, so evenly spacing hues by 360/n is the
+    wrong distribution -- it puts sequential sections at the *smallest*
+    hue step from one another. Stepping by the golden angle instead
+    spreads every consecutive pair far apart on the wheel (the classic
+    phyllotaxis trick), so neighboring sections stay visually distinct
+    regardless of how many sections there are.
+    """
+    order: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        key = section_key(chunk)
+        if key not in seen:
+            seen.add(key)
+            order.append(key)
+
+    colors = []
+    for i in range(len(order)):
+        hue = (i * _GOLDEN_ANGLE) % 1.0
+        r, g, b = colorsys.hls_to_rgb(hue, 0.45, 0.6)
+        colors.append(f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}")
+
+    return dict(zip(order, colors))
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +337,7 @@ def compose_boxed_image(
     base_image: Image.Image,
     page_chunks: list[tuple[int, dict]],
     chunk_regions: dict[int, list[fitz.Rect]],
+    section_colors: dict[str, str],
     zoom: float = ZOOM,
 ) -> Image.Image:
     overlay = Image.new("RGBA", base_image.size, (0, 0, 0, 0))
@@ -288,7 +349,7 @@ def compose_boxed_image(
         font = ImageFont.load_default()
 
     for number, chunk in page_chunks:
-        color = CONTENT_TYPE_COLORS.get(chunk.get("content_type") or "mixed", "#666666")
+        color = section_colors.get(section_key(chunk), "#666666")
 
         for region_idx, rect in enumerate(chunk_regions.get(number, [])):
             box = (rect.x0 * zoom, rect.y0 * zoom, rect.x1 * zoom, rect.y1 * zoom)
@@ -358,10 +419,15 @@ def heading_breadcrumb(chunk: dict) -> str:
 
 
 def chunk_card_html(
-    number: int, chunk: dict, thumbnails: list[Image.Image], mismatch_page: int | None = None
+    number: int,
+    chunk: dict,
+    thumbnails: list[Image.Image],
+    section_colors: dict[str, str],
+    mismatch_page: int | None = None,
 ) -> str:
     content_type = chunk.get("content_type") or "mixed"
-    color = CONTENT_TYPE_COLORS.get(content_type, "#666666")
+    type_color = CONTENT_TYPE_COLORS.get(content_type, "#666666")
+    accent_color = section_colors.get(section_key(chunk), "#666666")
     body = (
         table_markdown_to_html(chunk["table_markdown"])
         if chunk.get("table_markdown")
@@ -382,10 +448,10 @@ def chunk_card_html(
     )
 
     return f"""
-    <div class="chunk-card" id="chunk-{number}" style="--accent: {color}">
+    <div class="chunk-card" id="chunk-{number}" style="--accent: {accent_color}">
       <div class="chunk-head">
-        <span class="number-badge" style="background:{color}">{number}</span>
-        <span class="badge" style="background:{color}">{html.escape(content_type)}</span>
+        <span class="number-badge" style="background:{accent_color}">{number}</span>
+        <span class="badge" style="background:{type_color}">{html.escape(content_type)}</span>
         <code class="chunk-id">{html.escape(chunk['chunk_id'])}</code>
       </div>
       <div class="breadcrumb">{heading_breadcrumb(chunk)}</div>
@@ -416,12 +482,52 @@ def outline_html(nodes: list[OutlineNode], chunk_numbers: dict[str, int]) -> str
     return f"<ul>{''.join(items)}</ul>"
 
 
+def render_grouped_cards(
+    declared_here: list[tuple[int, dict]],
+    chunk_match: dict[int, tuple[int | None, list[fitz.Rect]]],
+    section_colors: dict[str, str],
+    get_base_image,
+) -> str:
+    """Cards for one page's chunks, clustered into a bracketed, colored
+    group per (level_2, level_3) heading pair -- so the card list itself
+    shows the hierarchy, not just a breadcrumb line on each card."""
+    if not declared_here:
+        return "<p class='empty'>No chunks.</p>"
+
+    groups_html = []
+    for (l2, l3), group_iter in groupby(declared_here, key=lambda item: _heading_group_key(item[1])):
+        group = list(group_iter)
+        color = section_colors.get(section_key(group[0][1]), "#666666")
+        label_parts = [p for p in (l2, l3) if p]
+        label = " &rsaquo; ".join(html.escape(p) for p in label_parts) if label_parts else "No heading"
+
+        cards_html = "\n".join(
+            chunk_card_html(
+                n,
+                c,
+                [crop_region(get_base_image(mp), rect) for rect in regions] if mp else [],
+                section_colors,
+                mismatch_page=mp if mp and mp != c["page_start"] else None,
+            )
+            for n, c in group
+            for mp, regions in [chunk_match[n]]
+        )
+        groups_html.append(
+            f'<div class="heading-group" style="--group-color: {color}">'
+            f'<div class="heading-group-label">{label}</div>'
+            f"{cards_html}"
+            "</div>"
+        )
+    return "\n".join(groups_html)
+
+
 def build() -> None:
     doc = fitz.open(PDF_PATH)
     raw_chunks = load_chunks(JSONL_PATH)
     numbered_chunks = list(enumerate(raw_chunks, start=1))
     chunk_by_number = dict(numbered_chunks)
     chunk_numbers = {c["chunk_id"]: n for n, c in numbered_chunks}
+    section_colors = assign_section_colors(raw_chunks)
 
     outline_nodes = build_outline(Chunk.model_validate(c) for c in raw_chunks)
 
@@ -452,25 +558,13 @@ def build() -> None:
             matched_here = [(n, chunk_by_number[n]) for n, (mp, _r) in chunk_match.items() if mp == page_num]
             regions_here = {n: chunk_match[n][1] for n, _c in matched_here}
 
-            boxed_image = compose_boxed_image(base_image, matched_here, regions_here)
+            boxed_image = compose_boxed_image(base_image, matched_here, regions_here, section_colors)
             image_b64 = image_to_base64_png(boxed_image)
 
             ASSETS_DIR.mkdir(exist_ok=True)
             boxed_image.convert("RGB").save(ASSETS_DIR / f"{ASSET_PREFIX}_{page_num}.png")
 
-            cards = (
-                "\n".join(
-                    chunk_card_html(
-                        n,
-                        c,
-                        [crop_region(get_base_image(mp), rect) for rect in regions] if mp else [],
-                        mismatch_page=mp if mp and mp != c["page_start"] else None,
-                    )
-                    for n, c in declared_here
-                    for mp, regions in [chunk_match[n]]
-                )
-                or "<p class='empty'>No chunks.</p>"
-            )
+            cards = render_grouped_cards(declared_here, chunk_match, section_colors, get_base_image)
             pages_html.append(
                 f"""
             <section class="page-row">
@@ -485,8 +579,12 @@ def build() -> None:
     finally:
         doc.close()
 
-    legend = "".join(
-        f'<span class="legend-item"><span class="dot" style="background:{color}"></span>{name}</span>'
+    section_legend = "".join(
+        f'<span class="legend-item"><span class="dot" style="background:{color}"></span>{html.escape(name)}</span>'
+        for name, color in section_colors.items()
+    )
+    type_legend = "".join(
+        f'<span class="type-pill" style="background:{color}">{name}</span>'
         for name, color in CONTENT_TYPE_COLORS.items()
     )
 
@@ -531,11 +629,21 @@ def build() -> None:
   }}
   .outline-chunk-link:hover {{ outline: 1px solid var(--muted); }}
 
+  .type-pill {{ color: white; font-size: 0.72rem; font-weight: 600; padding: 2px 9px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.02em; margin: 0 3px; display: inline-block; }}
+
   .page-row {{ display: grid; grid-template-columns: minmax(280px, 460px) 1fr; gap: 24px; margin-bottom: 40px; align-items: start; }}
   .page-image {{ position: sticky; top: 16px; }}
   .page-image img {{ width: 100%; border: 1px solid var(--border); border-radius: 6px; display: block; }}
   .page-label {{ text-align: center; color: var(--muted); font-size: 0.8rem; margin-top: 6px; }}
-  .page-chunks {{ display: flex; flex-direction: column; gap: 14px; min-width: 0; }}
+  .page-chunks {{ display: flex; flex-direction: column; gap: 20px; min-width: 0; }}
+
+  .heading-group {{ border-left: 3px solid var(--group-color); padding-left: 12px; }}
+  .heading-group-label {{
+    font-size: 0.74rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+    color: var(--group-color); margin-bottom: 8px;
+  }}
+  .heading-group .chunk-card + .chunk-card {{ margin-top: 12px; }}
+
   .chunk-card {{ border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 6px; padding: 12px 14px; background: var(--card-bg); scroll-margin-top: 16px; }}
   .chunk-card:target {{ outline: 2px solid var(--accent); }}
   .chunk-head {{ display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }}
@@ -560,9 +668,10 @@ def build() -> None:
 </head>
 <body>
   <h1>ViCH chunk visualization</h1>
-  <p class="subtitle">examples/docling_example.pdf &rarr; {len(raw_chunks)} chunks. Numbered boxes on the page match the numbered cards on the right.</p>
+  <p class="subtitle">examples/docling_example.pdf &rarr; {len(raw_chunks)} chunks. Numbered boxes on the page match the numbered cards on the right; color shows which section (below) a chunk belongs to.</p>
   <p class="caveat">Boxes/crops are estimated by matching each chunk's text back onto the PDF's text layer (vich's chunk schema has no bounding boxes) &mdash; a docs-only convenience, not part of vich's output. A chunk is searched for near its declared page, not only on it, since the VLM's self-reported page numbers are sometimes off by one (flagged on the card when that happens); some chunks still won't get a confident enough match to draw. The outline below, though, <em>is</em> a real vich feature (see <code>vich.outline</code>).</p>
-  <div class="legend">{legend}</div>
+  <div class="legend">{section_legend}</div>
+  <p class="caveat">content_type (shown as a badge on each card, not by color): {type_legend}</p>
   <div class="outline">
     <h2>Document outline</h2>
     {outline_html(outline_nodes, chunk_numbers)}

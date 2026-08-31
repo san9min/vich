@@ -110,16 +110,26 @@ each heading linking down to its chunk's card.
 
 ## What the visualization shows
 
-Each source page is rendered on the left with a numbered, color-coded box
-around every chunk found on it; the matching numbered card on the right
-shows a cropped thumbnail of that same region, the chunk's 3-level heading
-breadcrumb, body (or table, rendered from `table_markdown`), and extracted
-keywords.
+Color shows the **heading hierarchy**, not `content_type`: every distinct
+level_2 section gets its own color (adjacent sections are deliberately
+spread far apart on the hue wheel — a golden-angle hue step, not an even
+360/n one, so *neighboring* sections stay visually distinct instead of
+landing next to each other in hue too), and cards on the right are grouped
+and bracketed by their level_2/level_3 heading pair, not just listed flat
+with a breadcrumb line each. `content_type` still shows as a text badge on
+each card — it's just not what color means anymore.
 
-![Chunk visualization: page 1 of the Docling paper, with a box around every block of text including the author list — chunk 8, the one the recovery mechanism caught](assets/docling_page_1.png)
+Each source page is rendered on the left with a numbered box (colored by
+section) around every chunk found on it; the matching numbered card on the
+right — clustered under its section's colored bracket — shows a cropped
+thumbnail of that same region, the chunk's 3-level heading breadcrumb,
+body (or table, rendered from `table_markdown`), and extracted keywords.
+
+![Chunk visualization: page 1 of the Docling paper, with a distinct color per section — Abstract, Introduction, State of the Art — so neighboring sections are immediately distinguishable](assets/docling_page_1.png)
 
 Every block of text on this page is claimed by a box, including the author
-list at the top (chunk 8) — the one this run's recovery mechanism caught
+list at the top (chunk 8, magenta — "Design and Architecture," where its
+first real chunk lands) — the one this run's recovery mechanism caught
 after the VLM's own chunking skipped it.
 
 > **Note:** `vich`'s chunk schema has no bounding-box field — the VLM
