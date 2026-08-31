@@ -191,17 +191,9 @@ def _find_best_start(ptoks: list[str], ctoks: list[str], probe_len: int = 10, lo
 Rect = tuple[float, float, float, float]
 
 
-def _match_word_rects(page: fitz.Page, chunk: dict, lookahead: int = 14) -> list[Rect]:
-    """Word rects on `page` that plausibly correspond to `chunk`'s text, in
-    reading order. Tolerant of paraphrasing: a miss just advances the
-    pointer rather than aborting, so later distinctive words can still
-    re-anchor the match."""
-    pwords = _page_words(page)
-    ptoks = [_norm(w[4]) for w in pwords]
-    ctoks = _chunk_tokens(chunk)
-    if not ctoks:
-        return []
-
+def _match_from(pwords: list, ptoks: list[str], ctoks: list[str], lookahead: int) -> list[Rect]:
+    """Walk forward through `ctoks` from its own first token, anchoring
+    into `ptoks` and advancing past misses without aborting."""
     start = _find_best_start(ptoks, ctoks, lookahead=lookahead)
     if start is None:
         return []
@@ -220,6 +212,42 @@ def _match_word_rects(page: fitz.Page, chunk: dict, lookahead: int = 14) -> list
             i += 1
 
     return matched_rects
+
+
+def _match_word_rects(
+    page: fitz.Page, chunk: dict, lookahead: int = 14, num_anchors: int = 6
+) -> tuple[list[Rect], int]:
+    """Word rects on `page` that plausibly correspond to `chunk`'s text, in
+    reading order, plus the index into the chunk's own token list the
+    match actually started from.
+
+    A chunk that continues across a page break (which is the point of
+    batching multiple pages into one VLM call: content isn't artificially
+    split just because of where a page ends) only has its *tail* on a
+    later page -- anchoring solely on the chunk's first token, as a single
+    pass would, finds nothing there, since that token lives on the earlier
+    page. Trying a handful of anchor points spread through the chunk (not
+    just its start) and keeping whichever extends the furthest lets a
+    later page's share of a split chunk match on its own merits.
+    """
+    pwords = _page_words(page)
+    ptoks = [_norm(w[4]) for w in pwords]
+    ctoks = _chunk_tokens(chunk)
+    if not ctoks:
+        return [], 0
+
+    best_rects: list[Rect] = []
+    best_offset = 0
+    offsets = sorted({len(ctoks) * i // num_anchors for i in range(num_anchors)})
+    for offset in offsets:
+        sub_ctoks = ctoks[offset:]
+        if not sub_ctoks:
+            continue
+        rects = _match_from(pwords, ptoks, sub_ctoks, lookahead)
+        if len(rects) > len(best_rects):
+            best_rects, best_offset = rects, offset
+
+    return best_rects, best_offset
 
 
 def _split_into_regions(rects: list[Rect], gap_tol: float = 40, line_tol: float = 3) -> list[list[Rect]]:
@@ -285,37 +313,71 @@ def _regions_to_boxes(page: fitz.Page, chunk: dict, regions: list[list[Rect]]) -
     return boxes
 
 
-def find_best_page_and_regions(
+def find_matching_pages(
     doc: fitz.Document, chunk: dict, search_radius: int = 3, min_region_size: int = 3
-) -> tuple[int | None, list[fitz.Rect]]:
-    """Search pages near `chunk`'s declared page_start/page_end for the one
-    with the strongest text match, and return (page_num, regions) for it.
+) -> list[tuple[int, list[fitz.Rect]]]:
+    """Search pages near `chunk`'s declared page_start/page_end for where
+    it actually matches, and return [(page_num, regions), ...] -- usually
+    one page, but two when the chunk genuinely continues across a page
+    break (the point of batching multiple pages into one VLM call: content
+    isn't artificially split just because of where a page ends -- a chunk
+    like that should show up on both pages, not get silently collapsed
+    onto whichever one "wins").
 
     The VLM's own self-reported page numbers are sometimes off by a page or
-    two, so trusting the declared page alone silently produces "no match"
-    for a chunk that's perfectly matchable one page over. Ties are broken
-    by matched-word count, not by proximity to the declared page, since a
-    real match dominates a coincidental one by a wide margin in practice.
+    two as well, so the declared page isn't trusted on its own either --
+    every page in the search window is scored, and the one with the
+    strongest match ("primary") wins by matched-word count, since a real
+    match dominates a coincidental one by a wide margin in practice.
+
+    A second page is added only when primary's own best match starts well
+    into the chunk (`_match_word_rects`' anchor offset, not near token 0) --
+    i.e. primary plausibly holds the *tail* of a split chunk -- and an
+    earlier page in the window independently matches strongly starting
+    near token 0, plausibly holding the *head*. (This catches a chunk
+    split head/tail across two pages; a tail split across a *third* page
+    isn't handled.)
     """
     declared_start = chunk["page_start"]
     declared_end = chunk.get("page_end") or declared_start
     lo = max(1, declared_start - search_radius)
     hi = min(doc.page_count, declared_end + search_radius)
+    ctoks_len = len(_chunk_tokens(chunk))
 
-    best_page, best_regions, best_count = None, [], MIN_MATCHED_WORDS - 1
+    scored: dict[int, tuple[int, int, list[list[Rect]]]] = {}  # page -> (count, offset, regions)
     for page_num in range(lo, hi + 1):
         page = doc.load_page(page_num - 1)
-        rects = _match_word_rects(page, chunk)
+        rects, offset = _match_word_rects(page, chunk)
         regions = [r for r in _split_into_regions(rects) if len(r) >= min_region_size]
         count = sum(len(r) for r in regions)
-        if count > best_count:
-            best_page, best_count = page_num, count
-            best_regions = regions
+        if count >= MIN_MATCHED_WORDS:
+            scored[page_num] = (count, offset, regions)
 
-    if best_page is None:
-        return None, []
+    if not scored:
+        return []
 
-    return best_page, _regions_to_boxes(doc.load_page(best_page - 1), chunk, best_regions)
+    primary_page = max(scored, key=lambda p: scored[p][0])
+    _primary_count, primary_offset, _primary_regions = scored[primary_page]
+    result_pages = [primary_page]
+
+    near_chunk_start = ctoks_len * 0.1
+    # A head candidate needs to cover a real fraction of the chunk, not
+    # just clear MIN_MATCHED_WORDS -- a handful of common words landing
+    # near the top of an unrelated page is a coincidence, not a head split
+    # (observed in practice: two chunks each had a same-sized ~14-word,
+    # offset-0 "candidate" on an unrelated page, well short of this bar).
+    min_head_count = max(20, int(ctoks_len * 0.15))
+    if primary_offset > near_chunk_start:
+        head_candidates = {
+            p: v
+            for p, v in scored.items()
+            if p < primary_page and v[1] <= near_chunk_start and v[0] >= min_head_count
+        }
+        if head_candidates:
+            result_pages.append(max(head_candidates, key=lambda p: head_candidates[p][0]))
+
+    result_pages.sort()
+    return [(p, _regions_to_boxes(doc.load_page(p - 1), chunk, scored[p][2])) for p in result_pages]
 
 
 # ---------------------------------------------------------------------------
@@ -423,8 +485,9 @@ def chunk_card_html(
     chunk: dict,
     thumbnails: list[Image.Image],
     section_colors: dict[str, str],
-    mismatch_page: int | None = None,
+    matched_pages: list[int] | None = None,
 ) -> str:
+    matched_pages = matched_pages or []
     content_type = chunk.get("content_type") or "mixed"
     type_color = CONTENT_TYPE_COLORS.get(content_type, "#666666")
     accent_color = section_colors.get(section_key(chunk), "#666666")
@@ -440,12 +503,19 @@ def chunk_card_html(
         for t in thumbnails
     )
     thumbs_block = f'<div class="thumbs">{thumbs_html}</div>' if thumbs_html else ""
-    mismatch_html = (
-        f'<div class="mismatch">&#9888; vich labeled this chunk page {chunk["page_start"]}, '
-        f"but its text actually matches page {mismatch_page} &mdash; shown there instead.</div>"
-        if mismatch_page is not None
-        else ""
-    )
+
+    note_html = ""
+    if len(matched_pages) > 1:
+        pages_str = ", ".join(str(p) for p in matched_pages)
+        note_html = (
+            f'<div class="mismatch">&#8646; this chunk spans pages {pages_str} in the source '
+            f"(vich labeled it page {chunk['page_start']}) &mdash; boxed on each.</div>"
+        )
+    elif len(matched_pages) == 1 and matched_pages[0] != chunk["page_start"]:
+        note_html = (
+            f'<div class="mismatch">&#9888; vich labeled this chunk page {chunk["page_start"]}, '
+            f"but its text actually matches page {matched_pages[0]} &mdash; shown there instead.</div>"
+        )
 
     return f"""
     <div class="chunk-card" id="chunk-{number}" style="--accent: {accent_color}">
@@ -455,7 +525,7 @@ def chunk_card_html(
         <code class="chunk-id">{html.escape(chunk['chunk_id'])}</code>
       </div>
       <div class="breadcrumb">{heading_breadcrumb(chunk)}</div>
-      {mismatch_html}
+      {note_html}
       {thumbs_block}
       <div class="chunk-body">{body}</div>
       {keywords_html}
@@ -484,7 +554,7 @@ def outline_html(nodes: list[OutlineNode], chunk_numbers: dict[str, int]) -> str
 
 def render_grouped_cards(
     declared_here: list[tuple[int, dict]],
-    chunk_match: dict[int, tuple[int | None, list[fitz.Rect]]],
+    chunk_match: dict[int, list[tuple[int, list[fitz.Rect]]]],
     section_colors: dict[str, str],
     get_base_image,
 ) -> str:
@@ -505,12 +575,12 @@ def render_grouped_cards(
             chunk_card_html(
                 n,
                 c,
-                [crop_region(get_base_image(mp), rect) for rect in regions] if mp else [],
+                [crop_region(get_base_image(mp), rect) for mp, regions in matches for rect in regions],
                 section_colors,
-                mismatch_page=mp if mp and mp != c["page_start"] else None,
+                matched_pages=[mp for mp, _regions in matches],
             )
             for n, c in group
-            for mp, regions in [chunk_match[n]]
+            for matches in [chunk_match[n]]
         )
         groups_html.append(
             f'<div class="heading-group" style="--group-color: {color}">'
@@ -531,11 +601,11 @@ def build() -> None:
 
     outline_nodes = build_outline(Chunk.model_validate(c) for c in raw_chunks)
 
-    # Pass 1: find each chunk's best-matching page (which may differ from
-    # its declared page_start -- see find_best_page_and_regions) up front,
-    # since a card grouped under its declared page may need a crop sourced
-    # from a different page's rendered image.
-    chunk_match = {n: find_best_page_and_regions(doc, c) for n, c in numbered_chunks}
+    # Pass 1: find each chunk's matching page(s) (which may differ from, or
+    # outnumber, its declared page_start -- see find_matching_pages) up
+    # front, since a card grouped under its declared page may need crops
+    # sourced from a different page's (or several pages') rendered image.
+    chunk_match = {n: find_matching_pages(doc, c) for n, c in numbered_chunks}
 
     base_images: dict[int, Image.Image] = {}
 
@@ -555,8 +625,14 @@ def build() -> None:
             # card per page it spans); boxes are drawn on whichever page(s)
             # the chunk actually matched, which may be neither.
             declared_here = [(n, c) for n, c in numbered_chunks if c["page_start"] == page_num]
-            matched_here = [(n, chunk_by_number[n]) for n, (mp, _r) in chunk_match.items() if mp == page_num]
-            regions_here = {n: chunk_match[n][1] for n, _c in matched_here}
+            matched_here = [
+                (n, chunk_by_number[n])
+                for n, matches in chunk_match.items()
+                if any(mp == page_num for mp, _r in matches)
+            ]
+            regions_here = {
+                n: next(r for mp, r in chunk_match[n] if mp == page_num) for n, _c in matched_here
+            }
 
             boxed_image = compose_boxed_image(base_image, matched_here, regions_here, section_colors)
             image_b64 = image_to_base64_png(boxed_image)
@@ -669,7 +745,7 @@ def build() -> None:
 <body>
   <h1>ViCH chunk visualization</h1>
   <p class="subtitle">examples/docling_example.pdf &rarr; {len(raw_chunks)} chunks. Numbered boxes on the page match the numbered cards on the right; color shows which section (below) a chunk belongs to.</p>
-  <p class="caveat">Boxes/crops are estimated by matching each chunk's text back onto the PDF's text layer (vich's chunk schema has no bounding boxes) &mdash; a docs-only convenience, not part of vich's output. A chunk is searched for near its declared page, not only on it, since the VLM's self-reported page numbers are sometimes off by one (flagged on the card when that happens); some chunks still won't get a confident enough match to draw. The outline below, though, <em>is</em> a real vich feature (see <code>vich.outline</code>).</p>
+  <p class="caveat">Boxes/crops are estimated by matching each chunk's text back onto the PDF's text layer (vich's chunk schema has no bounding boxes) &mdash; a docs-only convenience, not part of vich's output. A chunk is searched for near its declared page, not only on it, since the VLM's self-reported page numbers are sometimes off by one (flagged on the card when that happens), and boxed on <em>every</em> page it genuinely spans, not just one, since batching multiple pages into a call is meant to let a chunk continue across a page break; some chunks still won't get a confident enough match to draw. The outline below, though, <em>is</em> a real vich feature (see <code>vich.outline</code>).</p>
   <div class="legend">{section_legend}</div>
   <p class="caveat">content_type (shown as a badge on each card, not by color): {type_legend}</p>
   <div class="outline">

@@ -42,7 +42,7 @@ python examples/generate_chunk_visualization.py
 open examples/chunk_visualization.html
 ```
 
-## Three fixes this example surfaced, in order
+## Four fixes this example surfaced, in order
 
 **1. Chunk text is grounded in the PDF's own text, not re-typed from the
 image.** An early version showed the VLM paraphrasing dense sentences —
@@ -79,6 +79,27 @@ section of the [root README](../README.md#content-recovery). On the run
 behind this JSONL, that caught a block the model skipped on page 1 (the
 author list) — `docling_example_7`, `content_type: "paragraph"`,
 `source_notes` starting `"Auto-recovered: ..."`.
+
+**4. (Visualization-only) A chunk spanning a page break needs a box on
+*both* pages, not one.** Batching more than one page into a single VLM
+call exists specifically so content isn't artificially split just because
+of where a page ends — and it works: `docling_example_3`'s chunk_text
+correctly merges the tail of page 1 ("...susceptibility to hallucinations,
+conversion quality...") with the start of page 2 ("The most popular
+conversion tools today leverage vision-language models...") into one
+coherent chunk. But the visualization's page-matching originally picked a
+single "best" page per chunk, so a genuinely 2-page chunk showed a box on
+only one of them — the other page's share looked abandoned, even though
+`vich parse` had merged it correctly. `find_matching_pages` in
+`generate_chunk_visualization.py` now tries several anchor points through
+a chunk's own text (not just its first word) when matching a page, and
+adds a second page when the winning page's match starts well into the
+chunk *and* an earlier page independently matches the missing head with a
+real (15%+ of the chunk, not just a few incidental words) share — a
+looser bar produced two false 2-page splits on unrelated, non-adjacent
+pages during testing, which is why it's this specific and not just "any
+overlap." This was never a `vich` pipeline bug; the chunking was already
+correct; only the box-drawing script needed to catch up.
 
 ## Document outline
 
@@ -137,13 +158,14 @@ after the VLM's own chunking skipped it.
 > boxes/crops here are a docs-only convenience: `generate_chunk_visualization.py`
 > estimates each one by matching the chunk's own text back onto the PDF's
 > text layer, splitting into separate regions wherever the match crosses a
-> column break or a large gap, and extending upward for a `figure` chunk
-> so the box lands on the whole figure, not just its caption (the VLM has
-> nothing to transcribe from a figure's own graphic, so only the caption
-> text matches directly). That only works for text-based PDFs, and it's
-> not part of what `vich parse` outputs. (The outline above, and the
-> content-recovery mechanism, *are* part of vich's actual output — not a
-> docs convenience.)
+> column break or a large gap, extending upward for a `figure` chunk so the
+> box lands on the whole figure, not just its caption (the VLM has nothing
+> to transcribe from a figure's own graphic, so only the caption text
+> matches directly), and drawing a box on *each* page a chunk genuinely
+> spans (see fix 4 above) rather than picking a single "best" one. That
+> only works for text-based PDFs, and it's not part of what `vich parse`
+> outputs. (The outline above, and the content-recovery mechanism, *are*
+> part of vich's actual output — not a docs convenience.)
 >
 > The search also isn't limited to a chunk's own declared `page_start` —
 > **2 of this example's 33 chunks are labeled with the wrong page** by the
