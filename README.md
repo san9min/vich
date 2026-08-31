@@ -77,7 +77,7 @@ entities, and a precomposed `embedding_text` ready for a vector store.
 See [`examples/`](examples/) for a worked example: a fictional 2-page PDF,
 the actual JSONL chunks vich produces from it, and a
 [chunk visualization page](examples/chunk_visualization.html) showing each
-source page next to the chunks extracted from it.
+source page with a box drawn around every chunk extracted from it.
 
 ## Roadmap
 
