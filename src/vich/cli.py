@@ -39,8 +39,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parse_cmd.add_argument(
         "--batch-size",
         type=int,
-        default=4,
-        help="Pages sent to the VLM per call (default: 4).",
+        default=2,
+        help="Pages sent to the VLM per call (default: 2; a bigger batch means a "
+        "longer prompt, which raises the risk the model drops a paragraph outright).",
     )
     parse_cmd.add_argument(
         "--zoom",

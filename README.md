@@ -32,7 +32,12 @@ images are for layout/structure decisions, not re-transcribing text the
 model already has exactly. Without this, dense sentences drift into
 paraphrasing (an LLM "reading" an image tends to summarize, not
 transcribe); see [`examples/README.md`](examples/README.md) for a
-before/after.
+before/after. That fix has its own failure mode, though: a longer prompt
+(more images and more extracted text per call) makes it more likely the
+model drops a paragraph outright instead of merely paraphrasing it, so
+`batch_size` defaults small (2 pages) and `vich.chunking.coverage` checks
+each batch's chunks against the text it was given, warning when a batch
+looks like it lost content.
 
 ## Project structure
 
@@ -97,13 +102,13 @@ uv run vich outline examples/docling_example.jsonl
 
 ```text
 - Docling: An Efficient Open-Source Toolkit for AI-driven Document Conversion
-  - Introduction
-    - Overview and Features (1 chunk)
-  - Design and Architecture
-    - Docling Document Data Model (1 chunk)
-    - Parser Backends (1 chunk)
-    - Pipelines (1 chunk)
-    ...
+  - Abstract (1 chunk)
+  - Introduction (1 chunk)
+    - Features (1 chunk)
+  - State of the Art (2 chunks)
+  - Design and Architecture (1 chunk)
+    - Docling Document (2 chunks)
+  ...
 ```
 
 Or as a library: `vich.build_outline(chunks)` returns a tree of
@@ -122,12 +127,18 @@ it, plus the document outline linking down to each one.
 
 - **`page_start`/`page_end` aren't fully reliable.** They come from the
   VLM's own self-reported labels for each chunk, and on the example paper
-  in [`examples/`](examples/) several chunks are off by a page. If you need
-  precise page citations, verify them rather than trusting them outright —
-  see the note in [`examples/README.md`](examples/README.md) for how this
-  was found. (Text-grounding chunk_text against the PDF's extracted text
-  fixed *wording* fidelity; it doesn't fix page attribution, which is a
-  separate self-reported field.)
+  in [`examples/`](examples/) a couple of chunks are off by a page. If you
+  need precise page citations, verify them rather than trusting them
+  outright — see the note in [`examples/README.md`](examples/README.md)
+  for how this was found. (Text-grounding chunk_text against the PDF's
+  extracted text fixed *wording* fidelity; it doesn't fix page attribution,
+  which is a separate self-reported field.)
+- **The model can drop a paragraph outright, not just paraphrase it** —
+  observed on the example paper before `batch_size` was reduced (see
+  [`examples/README.md`](examples/README.md)). `vich.chunking.coverage`
+  warns when a batch's chunks look like they under-cover the text it was
+  given, but there's no way to force an LLM not to do this in the first
+  place; a warning is visibility, not a guarantee of complete coverage.
 - **Chunk boundaries and `content_type` choices vary between runs** on the
   same PDF, since they're still an LLM's judgment call, not a deterministic
   rule. Re-running `vich parse` on the same file won't reproduce byte-for-byte
@@ -140,6 +151,7 @@ it, plus the document outline linking down to each one.
 - [x] Docs + example PDF walkthrough
 - [x] Document outline (`vich.outline`)
 - [x] Ground chunk_text in the PDF's extracted text (reduce paraphrasing)
+- [x] Batch-coverage warning for dropped content (`vich.chunking.coverage`)
 - [ ] Pluggable VLM backend (OpenAI-compatible today; others later)
 - [ ] More reliable per-chunk page attribution
 - [ ] Publish to PyPI

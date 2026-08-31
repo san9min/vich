@@ -16,6 +16,7 @@ from openai import OpenAI
 from tqdm import tqdm
 
 from vich.chunking.client import call_vlm_chunker
+from vich.chunking.coverage import LOW_COVERAGE_WARNING_THRESHOLD, coverage_ratio
 from vich.chunking.normalize import IdResolver, default_id_resolver, normalize_chunk
 from vich.parsing.pdf_renderer import (
     count_pages,
@@ -33,7 +34,7 @@ def process_pdf(
     pdf_path: Path,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     model: str | None = None,
-    batch_size: int = 4,
+    batch_size: int = 2,
     zoom: float = 2.0,
     overwrite: bool = False,
     source_url: str = "",
@@ -45,6 +46,14 @@ def process_pdf(
     to images, sent to the VLM chunker, and the resulting chunks are
     normalized and appended. Heading hierarchy and a short summary carry
     over between batches so chunking stays consistent across page breaks.
+
+    `batch_size` defaults small (2) because a bigger batch means a longer
+    prompt (more page images plus more extracted text), and a longer
+    prompt makes it more likely the model drops a paragraph outright
+    instead of merely paraphrasing it -- observed in practice on a 4-page
+    batch of a dense academic paper. Raise it for faster/cheaper runs on
+    sparser documents; a low-coverage warning (see `vich.chunking.coverage`)
+    will flag it if a batch that size starts dropping content.
     """
     resolved_model = model or os.getenv("VICH_VLM_MODEL")
     if not resolved_model:
@@ -106,6 +115,16 @@ def process_pdf(
             )
             all_chunks.append(chunk)
 
+        batch_chunks = all_chunks[base_idx:]
+        ratio = coverage_ratio(
+            page_text, [c.chunk_text or "" for c in batch_chunks] + [c.table_markdown or "" for c in batch_chunks]
+        )
+        if ratio < LOW_COVERAGE_WARNING_THRESHOLD:
+            print(
+                f"Warning: pages {page_start}-{page_end} of {source} may be missing content "
+                f"(only ~{ratio:.0%} of the extracted text's words showed up in this batch's chunks)"
+            )
+
         previous_batch_summary = batch_result.get("batch_summary") or previous_batch_summary
         previous_heading_hierarchy = (
             batch_result.get("heading_hierarchy") or previous_heading_hierarchy
@@ -127,7 +146,7 @@ def process_documents(
     raw_dir: Path,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     model: str | None = None,
-    batch_size: int = 4,
+    batch_size: int = 2,
     zoom: float = 2.0,
     overwrite: bool = False,
     source_urls: dict[str, str] | None = None,
