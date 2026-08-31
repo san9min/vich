@@ -84,6 +84,7 @@ def process_pdf(
         )
 
         raw_chunks = batch_result.get("chunks") or []
+        base_idx = len(all_chunks)  # fixed offset: don't re-read len(all_chunks) as it grows below
 
         for local_idx, raw_chunk in enumerate(raw_chunks):
             chunk = normalize_chunk(
@@ -93,7 +94,7 @@ def process_pdf(
                 source_url=source_url,
                 page_start=page_start,
                 page_end=page_end,
-                idx=len(all_chunks) + local_idx,
+                idx=base_idx + local_idx,
                 id_resolver=id_resolver,
             )
             all_chunks.append(chunk)

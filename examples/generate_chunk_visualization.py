@@ -1,14 +1,20 @@
 """Generate examples/chunk_visualization.html from
-examples/nimbus_storage_plan.{pdf,jsonl}: a self-contained page showing each
+examples/docling_example.{pdf,jsonl}: a self-contained page showing each
 source page with its chunks boxed directly on the page image, plus a card
 per chunk with its full text/table and metadata.
 
 vich's chunks don't carry bounding boxes (the VLM reasons over the whole
-page image, not coordinates), so the box for each chunk is *estimated* by
-matching the chunk's own text back onto the PDF's text layer (word by word,
-tolerant of minor rewording) and taking the bounding rect of the matched
-words. This only works for text-based PDFs, and is purely a docs/demo
-convenience -- it is not part of the vich package or its output schema.
+page image, not coordinates), so the box(es) for each chunk are *estimated*
+by matching the chunk's own text back onto the PDF's text layer (word by
+word, tolerant of rewording/skips) and grouping the matched words into
+regions: a new region starts wherever the matched reading position jumps
+back up the page (a two-column wrap) or skips a large vertical gap (likely
+unrelated content in between). A chunk spanning a column break correctly
+gets two boxes instead of one giant box swallowing the gutter between them.
+This only works for text-based PDFs, some chunks (especially short,
+heavily-paraphrased ones) won't get a confident match at all, and it's
+purely a docs/demo convenience -- it is not part of the vich package or its
+output schema.
 
 Re-run after regenerating the example PDF or re-running `vich parse`:
 
@@ -22,16 +28,22 @@ import html
 import io
 import json
 import re
+from itertools import pairwise
 from pathlib import Path
 
 import fitz  # PyMuPDF
 from PIL import Image, ImageDraw, ImageFont
 
 EXAMPLES_DIR = Path(__file__).parent
-PDF_PATH = EXAMPLES_DIR / "nimbus_storage_plan.pdf"
-JSONL_PATH = EXAMPLES_DIR / "nimbus_storage_plan.jsonl"
+PDF_PATH = EXAMPLES_DIR / "docling_example.pdf"
+JSONL_PATH = EXAMPLES_DIR / "docling_example.jsonl"
 OUTPUT_PATH = EXAMPLES_DIR / "chunk_visualization.html"
 ASSETS_DIR = EXAMPLES_DIR / "assets"
+ASSET_PREFIX = "docling_page"
+
+# A chunk needs at least this many matched words, after splitting into
+# column/gap-aware regions, before we trust its position enough to draw it.
+MIN_MATCHED_WORDS = 6
 
 ZOOM = 2.0
 
@@ -72,7 +84,7 @@ def _chunk_tokens(chunk: dict) -> list[str]:
     return [t for t in (_norm(tok) for tok in raw.split()) if t]
 
 
-def _find_best_start(ptoks: list[str], ctoks: list[str], probe_len: int = 10, lookahead: int = 8) -> int | None:
+def _find_best_start(ptoks: list[str], ctoks: list[str], probe_len: int = 10, lookahead: int = 14) -> int | None:
     """Pick the occurrence of ctoks[0] in ptoks that best continues matching
     the next few chunk tokens, since a chunk's first word (e.g. "Plan") may
     also appear earlier on the page in an unrelated heading."""
@@ -97,20 +109,26 @@ def _find_best_start(ptoks: list[str], ctoks: list[str], probe_len: int = 10, lo
         if score > best_score:
             best_idx, best_score = cand, score
 
-    return best_idx if best_score >= max(2, len(probe) // 3) else None
+    return best_idx if best_score >= max(2, len(probe) // 4) else None
 
 
-def estimate_chunk_bbox(page: fitz.Page, chunk: dict, lookahead: int = 8) -> tuple[fitz.Rect, float] | None:
-    """Best-effort (bbox, match_ratio) for where `chunk` lives on `page`."""
+Rect = tuple[float, float, float, float]
+
+
+def _match_word_rects(page: fitz.Page, chunk: dict, lookahead: int = 14) -> list[Rect]:
+    """Word rects on `page` that plausibly correspond to `chunk`'s text, in
+    reading order. Tolerant of paraphrasing: a miss just advances the
+    pointer rather than aborting, so later distinctive words can still
+    re-anchor the match."""
     pwords = _page_words(page)
     ptoks = [_norm(w[4]) for w in pwords]
     ctoks = _chunk_tokens(chunk)
     if not ctoks:
-        return None
+        return []
 
     start = _find_best_start(ptoks, ctoks, lookahead=lookahead)
     if start is None:
-        return None
+        return []
 
     i, matched_rects = start, []
     for tok in ctoks:
@@ -125,15 +143,46 @@ def estimate_chunk_bbox(page: fitz.Page, chunk: dict, lookahead: int = 8) -> tup
         if not found:
             i += 1
 
-    if not matched_rects:
-        return None
+    return matched_rects
 
-    x0 = min(r[0] for r in matched_rects)
-    y0 = min(r[1] for r in matched_rects)
-    x1 = max(r[2] for r in matched_rects)
-    y1 = max(r[3] for r in matched_rects)
-    ratio = len(matched_rects) / len(ctoks)
-    return fitz.Rect(x0, y0, x1, y1), ratio
+
+def _split_into_regions(rects: list[Rect], gap_tol: float = 40, line_tol: float = 3) -> list[list[Rect]]:
+    """Split matched word rects (in reading order) into separate regions
+    wherever the reading position jumps back up the page (a column wrap) or
+    skips a large vertical gap (likely unrelated content in between, so the
+    next match may just be coincidental)."""
+    if not rects:
+        return []
+
+    regions = [[rects[0]]]
+    for prev, curr in pairwise(rects):
+        jumped_up = curr[1] < prev[1] - line_tol and curr[1] < prev[3] - line_tol
+        big_gap = curr[1] > prev[3] + gap_tol
+        if jumped_up or big_gap:
+            regions.append([curr])
+        else:
+            regions[-1].append(curr)
+    return regions
+
+
+def estimate_chunk_regions(page: fitz.Page, chunk: dict, min_region_size: int = 3) -> list[fitz.Rect]:
+    """Best-effort bounding rect(s) for where `chunk` lives on `page`. May
+    return zero (no confident match), one, or several rects (e.g. a
+    paragraph that continues across a two-column break)."""
+    rects = _match_word_rects(page, chunk)
+    regions = [r for r in _split_into_regions(rects) if len(r) >= min_region_size]
+
+    if sum(len(r) for r in regions) < MIN_MATCHED_WORDS:
+        return []
+
+    boxes = []
+    for region in regions:
+        x0 = min(r[0] for r in region)
+        y0 = min(r[1] for r in region)
+        x1 = max(r[2] for r in region)
+        y1 = max(r[3] for r in region)
+        boxes.append(fitz.Rect(x0, y0, x1, y1))
+    return boxes
 
 
 # ---------------------------------------------------------------------------
@@ -154,25 +203,27 @@ def render_boxed_page(page: fitz.Page, page_chunks: list[tuple[int, dict]], zoom
         font = ImageFont.load_default()
 
     for number, chunk in page_chunks:
-        result = estimate_chunk_bbox(page, chunk)
-        if result is None:
-            continue
-        rect, _ratio = result
+        regions = estimate_chunk_regions(page, chunk)
         color = CONTENT_TYPE_COLORS.get(chunk.get("content_type") or "mixed", "#666666")
-        box = (rect.x0 * zoom, rect.y0 * zoom, rect.x1 * zoom, rect.y1 * zoom)
-        pad = 4
-        box = (box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad)
 
-        draw.rounded_rectangle(box, radius=4, outline=color, width=3)
-        draw.rectangle(box, fill=(*_hex_to_rgb(color), 28))
+        for region_idx, rect in enumerate(regions):
+            box = (rect.x0 * zoom, rect.y0 * zoom, rect.x1 * zoom, rect.y1 * zoom)
+            pad = 4
+            box = (box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad)
 
-        badge_r = 11
-        cx, cy = box[0] + badge_r, box[1] - 2
-        draw.ellipse((cx - badge_r, cy - badge_r, cx + badge_r, cy + badge_r), fill=color)
-        label = str(number)
-        bbox = draw.textbbox((0, 0), label, font=font)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        draw.text((cx - tw / 2, cy - th / 2 - bbox[1]), label, fill="white", font=font)
+            draw.rounded_rectangle(box, radius=4, outline=color, width=3)
+            draw.rectangle(box, fill=(*_hex_to_rgb(color), 28))
+
+            if region_idx > 0:
+                continue  # one number badge per chunk, on its first region
+
+            badge_r = 11
+            cx, cy = box[0] + badge_r, box[1] - 2
+            draw.ellipse((cx - badge_r, cy - badge_r, cx + badge_r, cy + badge_r), fill=color)
+            label = str(number)
+            bbox = draw.textbbox((0, 0), label, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text((cx - tw / 2, cy - th / 2 - bbox[1]), label, fill="white", font=font)
 
     return Image.alpha_composite(base, overlay)
 
@@ -258,7 +309,7 @@ def build() -> None:
             image_b64 = image_to_base64_png(boxed_image)
 
             ASSETS_DIR.mkdir(exist_ok=True)
-            boxed_image.convert("RGB").save(ASSETS_DIR / f"nimbus_page_{page_num}.png")
+            boxed_image.convert("RGB").save(ASSETS_DIR / f"{ASSET_PREFIX}_{page_num}.png")
 
             cards = "\n".join(chunk_card_html(n, c) for n, c in page_chunks) or "<p class='empty'>No chunks.</p>"
             pages_html.append(
@@ -328,8 +379,8 @@ def build() -> None:
 </head>
 <body>
   <h1>ViCH chunk visualization</h1>
-  <p class="subtitle">examples/nimbus_storage_plan.pdf &rarr; {len(chunks)} chunks. Numbered boxes on the page match the numbered cards on the right.</p>
-  <p class="caveat">Boxes are estimated by matching each chunk's text back onto the PDF's text layer (vich's chunk schema has no bounding boxes) &mdash; a docs-only convenience, not part of vich's output.</p>
+  <p class="subtitle">examples/docling_example.pdf &rarr; {len(chunks)} chunks. Numbered boxes on the page match the numbered cards on the right.</p>
+  <p class="caveat">Boxes are estimated by matching each chunk's text back onto the PDF's text layer (vich's chunk schema has no bounding boxes) &mdash; a docs-only convenience, not part of vich's output. Some chunks don't get a confident enough match to draw.</p>
   <div class="legend">{legend}</div>
   {''.join(pages_html)}
 </body>
