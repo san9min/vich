@@ -127,7 +127,10 @@ uv run vich outline examples/docling_example.jsonl
 ```
 
 The visualization's "Document outline" section renders the same tree, with
-each heading linking down to its chunk's card.
+each heading linking down to its chunk's card — and each title colored by
+its section, the same color used for that section's boxes and cards
+throughout the page, so the outline reads as a legend for the whole
+visualization rather than a separate, uncolored list.
 
 ## What the visualization shows
 
@@ -145,6 +148,12 @@ section) around every chunk found on it; the matching numbered card on the
 right — clustered under its section's colored bracket — shows a cropped
 thumbnail of that same region, the chunk's 3-level heading breadcrumb,
 body (or table, rendered from `table_markdown`), and extracted keywords.
+
+A dashed divider runs across the page wherever a new **batch** starts
+("Batch 3 — pages 5-6 sent to the VLM in one call"), and each page's own
+label repeats which batch it's part of. That's the mechanism fix 4 above
+depends on: pages inside the same batch are exactly the ones a chunk can
+legitimately continue across, since they were all in the same VLM call.
 
 ![Chunk visualization: page 1 of the Docling paper, with a distinct color per section — Abstract, Introduction, State of the Art — so neighboring sections are immediately distinguishable](assets/docling_page_1.png)
 

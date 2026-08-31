@@ -67,11 +67,21 @@ OUTPUT_PATH = EXAMPLES_DIR / "chunk_visualization.html"
 ASSETS_DIR = EXAMPLES_DIR / "assets"
 ASSET_PREFIX = "docling_page"
 
+# Must match the --batch-size this example's docling_example.jsonl was
+# actually produced with (see examples/README.md) -- not stored in the
+# JSONL itself, so it can't be read back from the data.
+BATCH_SIZE = 2
+
 # A chunk needs at least this many matched words, after splitting into
 # column/gap-aware regions, before we trust its position enough to draw it.
 MIN_MATCHED_WORDS = 6
 
 ZOOM = 2.0
+
+
+def batch_for_page(page_num: int, batch_size: int = BATCH_SIZE) -> int:
+    """Which VLM call (1-based) produced chunks starting on this page."""
+    return (page_num - 1) // batch_size + 1
 
 CONTENT_TYPE_COLORS = {
     "paragraph": "#3b6fd6",
@@ -533,18 +543,31 @@ def chunk_card_html(
     """
 
 
-def outline_html(nodes: list[OutlineNode], chunk_numbers: dict[str, int]) -> str:
+def outline_html(
+    nodes: list[OutlineNode],
+    chunk_numbers: dict[str, int],
+    section_colors: dict[str, str],
+    inherited_color: str | None = None,
+) -> str:
+    """Color each title with its section's color (matching the boxes/cards
+    that color came from) -- a level_2 node's title is colored directly
+    from section_colors, and its level_3 children inherit that same color,
+    so the whole branch reads as one section at a glance."""
     items = []
     for node in nodes:
+        color = section_colors.get(node.title, inherited_color)
+        title_style = f' style="color:{color}"' if color else ""
         own_links = "".join(
             f'<a class="outline-chunk-link" href="#chunk-{chunk_numbers[cid]}">{chunk_numbers[cid]}</a>'
             for cid in node.chunk_ids
             if cid in chunk_numbers
         )
-        children_html = outline_html(node.children, chunk_numbers) if node.children else ""
+        children_html = (
+            outline_html(node.children, chunk_numbers, section_colors, color) if node.children else ""
+        )
         items.append(
             f'<li class="outline-l{node.level}">'
-            f'<span class="outline-title">{html.escape(node.title)}</span>'
+            f'<span class="outline-title"{title_style}>{html.escape(node.title)}</span>'
             f'{own_links}'
             f"{children_html}"
             "</li>"
@@ -614,11 +637,23 @@ def build() -> None:
             base_images[page_num] = render_page_base(doc.load_page(page_num - 1))
         return base_images[page_num]
 
+    total_pages = doc.page_count
     pages_html = []
+    prev_batch: int | None = None
     try:
         for page_index in range(doc.page_count):
             page_num = page_index + 1
             base_image = get_base_image(page_num)
+
+            batch_num = batch_for_page(page_num)
+            if batch_num != prev_batch:
+                batch_start = (batch_num - 1) * BATCH_SIZE + 1
+                batch_end = min(batch_start + BATCH_SIZE - 1, doc.page_count)
+                batch_pages = f"page {batch_start}" if batch_start == batch_end else f"pages {batch_start}-{batch_end}"
+                pages_html.append(
+                    f'<div class="batch-divider">Batch {batch_num} &mdash; {batch_pages} sent to the VLM in one call</div>'
+                )
+                prev_batch = batch_num
 
             # Cards are grouped under each chunk's *first* declared page (a
             # multi-page chunk would otherwise get one duplicate <div id=...>
@@ -646,7 +681,7 @@ def build() -> None:
             <section class="page-row">
               <div class="page-image">
                 <img src="data:image/png;base64,{image_b64}" alt="Source PDF page {page_num} with chunk boxes" />
-                <div class="page-label">page {page_num}</div>
+                <div class="page-label">page {page_num} &middot; batch {batch_num}</div>
               </div>
               <div class="page-chunks">{cards}</div>
             </section>
@@ -707,6 +742,12 @@ def build() -> None:
 
   .type-pill {{ color: white; font-size: 0.72rem; font-weight: 600; padding: 2px 9px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.02em; margin: 0 3px; display: inline-block; }}
 
+  .batch-divider {{
+    margin: 36px 0 -8px; padding-bottom: 10px; border-bottom: 2px dashed var(--border);
+    font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted);
+  }}
+  .batch-divider:first-of-type {{ margin-top: 0; }}
+
   .page-row {{ display: grid; grid-template-columns: minmax(280px, 460px) 1fr; gap: 24px; margin-bottom: 40px; align-items: start; }}
   .page-image {{ position: sticky; top: 16px; }}
   .page-image img {{ width: 100%; border: 1px solid var(--border); border-radius: 6px; display: block; }}
@@ -750,7 +791,7 @@ def build() -> None:
   <p class="caveat">content_type (shown as a badge on each card, not by color): {type_legend}</p>
   <div class="outline">
     <h2>Document outline</h2>
-    {outline_html(outline_nodes, chunk_numbers)}
+    {outline_html(outline_nodes, chunk_numbers, section_colors)}
   </div>
   {''.join(pages_html)}
 </body>
@@ -758,7 +799,7 @@ def build() -> None:
 """
 
     OUTPUT_PATH.write_text(html_doc, encoding="utf-8")
-    print(f"Wrote {OUTPUT_PATH} ({len(raw_chunks)} chunks across {len(pages_html)} pages)")
+    print(f"Wrote {OUTPUT_PATH} ({len(raw_chunks)} chunks across {total_pages} pages)")
 
 
 if __name__ == "__main__":
