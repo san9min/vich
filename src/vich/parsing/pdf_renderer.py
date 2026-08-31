@@ -80,3 +80,24 @@ def count_pages(pdf_path: Path) -> int:
         return doc.page_count
     finally:
         doc.close()
+
+
+def extract_page_text(pdf_path: Path, page_start: int, page_end: int) -> str:
+    """Extract the PDF's own text layer for a 1-based, inclusive page range.
+
+    Used as grounding input alongside the page images so the VLM can quote
+    `chunk_text` verbatim from the source instead of re-transcribing it
+    from the image (which drifts into paraphrasing on dense text). Returns
+    "" for scanned/image-only pages with no text layer -- there's nothing
+    to ground against, so the VLM falls back to reading the image.
+    """
+    doc = fitz.open(pdf_path)
+    try:
+        parts = []
+        for page_num in range(page_start, page_end + 1):
+            text = doc.load_page(page_num - 1).get_text("text").strip()
+            if text:
+                parts.append(f"--- page {page_num} ---\n{text}")
+        return "\n\n".join(parts)
+    finally:
+        doc.close()

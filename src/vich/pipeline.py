@@ -17,7 +17,12 @@ from tqdm import tqdm
 
 from vich.chunking.client import call_vlm_chunker
 from vich.chunking.normalize import IdResolver, default_id_resolver, normalize_chunk
-from vich.parsing.pdf_renderer import count_pages, render_pdf_pages_to_base64, safe_stem
+from vich.parsing.pdf_renderer import (
+    count_pages,
+    extract_page_text,
+    render_pdf_pages_to_base64,
+    safe_stem,
+)
 from vich.schema import Chunk
 
 DEFAULT_OUTPUT_DIR = Path("data/processed")
@@ -69,6 +74,7 @@ def process_pdf(
             page_end=page_end,
             zoom=zoom,
         )
+        page_text = extract_page_text(pdf_path=pdf_path, page_start=page_start, page_end=page_end)
 
         batch_result = call_vlm_chunker(
             client=client,
@@ -81,6 +87,7 @@ def process_pdf(
             previous_batch_summary=previous_batch_summary,
             previous_last_chunk=previous_last_chunk,
             previous_heading_hierarchy=previous_heading_hierarchy,
+            extracted_page_text=page_text,
         )
 
         raw_chunks = batch_result.get("chunks") or []

@@ -20,7 +20,7 @@ not just its caption line.
 
 The search isn't limited to a chunk's own declared page_start/page_end,
 either: the VLM's self-reported page numbers are sometimes off by a page
-or two (observed on this very example -- almost half its chunks), so each
+or two (observed on this very example -- several of its chunks), so each
 chunk is matched against a small window of nearby pages and shown wherever
 the match actually lands, with a note on the card when that differs from
 what vich labeled it.
@@ -233,12 +233,10 @@ def find_best_page_and_regions(
     with the strongest text match, and return (page_num, regions) for it.
 
     The VLM's own self-reported page numbers are sometimes off by a page or
-    two (observed on this very example -- a chunk about "Parser Backends"
-    labeled page 2 whose text actually lives on page 3), so trusting the
-    declared page alone silently produces "no match" for a chunk that's
-    perfectly matchable one page over. Ties are broken by matched-word
-    count, not by proximity to the declared page, since a real match
-    dominates a coincidental one by a wide margin in practice.
+    two, so trusting the declared page alone silently produces "no match"
+    for a chunk that's perfectly matchable one page over. Ties are broken
+    by matched-word count, not by proximity to the declared page, since a
+    real match dominates a coincidental one by a wide margin in practice.
     """
     declared_start = chunk["page_start"]
     declared_end = chunk.get("page_end") or declared_start

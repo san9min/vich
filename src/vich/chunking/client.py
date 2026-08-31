@@ -54,11 +54,17 @@ def call_vlm_chunker(
     previous_batch_summary: str,
     previous_last_chunk: str,
     previous_heading_hierarchy: dict[str, Any],
+    extracted_page_text: str = "",
     prompt_template: str = PROMPT_TEMPLATE,
     max_output_tokens: int = 8000,
     temperature: float = 0.1,
 ) -> dict[str, Any]:
     """Send one page batch to the VLM and return the parsed batch result dict.
+
+    `extracted_page_text` (see `vich.parsing.extract_page_text`) grounds
+    chunk_text in the PDF's own text layer instead of letting the model
+    re-transcribe it from the image, which drifts into paraphrasing on
+    dense text; pass "" for scanned/image-only PDFs with no text layer.
 
     Returns the raw parsed JSON (matching the schema in `prompt.py`);
     callers normalize individual chunks via `chunking.normalize`.
@@ -71,6 +77,7 @@ def call_vlm_chunker(
         previous_batch_summary=previous_batch_summary,
         previous_last_chunk=previous_last_chunk,
         previous_heading_hierarchy=previous_heading_hierarchy,
+        extracted_page_text=extracted_page_text,
         template=prompt_template,
     )
 

@@ -91,3 +91,32 @@ def test_build_prompt_fills_placeholders_and_leaves_schema_braces_intact():
     assert '"level_1": "Doc One"' in prompt
     # The JSON schema block's literal braces must survive templating.
     assert '"chunks": [' in prompt
+
+
+def test_build_prompt_includes_extracted_page_text_when_given():
+    prompt = build_prompt(
+        document_id="doc_1",
+        source="Doc One",
+        page_start=1,
+        page_end=1,
+        previous_batch_summary="",
+        previous_last_chunk="",
+        previous_heading_hierarchy={},
+        extracted_page_text="--- page 1 ---\nApplicants must be 19 or older.",
+    )
+
+    assert "Applicants must be 19 or older." in prompt
+
+
+def test_build_prompt_notes_missing_text_layer_when_not_given():
+    prompt = build_prompt(
+        document_id="doc_1",
+        source="Doc One",
+        page_start=1,
+        page_end=1,
+        previous_batch_summary="",
+        previous_last_chunk="",
+        previous_heading_hierarchy={},
+    )
+
+    assert "no text layer" in prompt

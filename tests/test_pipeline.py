@@ -13,6 +13,7 @@ def test_process_pdf_assigns_dense_sequential_chunk_ids(tmp_path, monkeypatch):
 
     monkeypatch.setattr(pipeline, "count_pages", lambda pdf_path: 8)
     monkeypatch.setattr(pipeline, "render_pdf_pages_to_base64", lambda **kwargs: [])
+    monkeypatch.setattr(pipeline, "extract_page_text", lambda **kwargs: "")
 
     # Two batches (batch_size=4, 8 pages) with 3 and 2 chunks respectively.
     batch_results = iter(
@@ -35,3 +36,28 @@ def test_process_pdf_assigns_dense_sequential_chunk_ids(tmp_path, monkeypatch):
     chunk_ids = [json.loads(line)["chunk_id"] for line in lines]
 
     assert chunk_ids == [f"document_{i}" for i in range(5)]
+
+
+def test_process_pdf_passes_extracted_page_text_to_the_vlm_call(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "count_pages", lambda pdf_path: 1)
+    monkeypatch.setattr(pipeline, "render_pdf_pages_to_base64", lambda **kwargs: [])
+    monkeypatch.setattr(
+        pipeline, "extract_page_text", lambda **kwargs: "--- page 1 ---\nVerbatim source text."
+    )
+
+    seen_texts = []
+
+    def fake_call_vlm_chunker(**kwargs):
+        seen_texts.append(kwargs["extracted_page_text"])
+        return {"chunks": []}
+
+    monkeypatch.setattr(pipeline, "call_vlm_chunker", fake_call_vlm_chunker)
+
+    pipeline.process_pdf(
+        client=object(),
+        pdf_path=Path("document.pdf"),
+        output_dir=tmp_path,
+        model="test-model",
+    )
+
+    assert seen_texts == ["--- page 1 ---\nVerbatim source text."]

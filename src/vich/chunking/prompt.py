@@ -28,42 +28,52 @@ Input context:
 - previous_last_chunk: {{previous_last_chunk}}
 - previous_heading_hierarchy: {{previous_heading_hierarchy}}
 
+Extracted page text (from the PDF's own text layer, in reading order per page; may split words across a line-wrapped hyphen, and may interleave columns imperfectly -- use the images, not this text, to judge reading order and layout). Empty for a page means it has no text layer (e.g. a scanned image) and you must transcribe that page from the image instead.
+---
+{{extracted_page_text}}
+---
+
 Chunking rules:
 
-1. Preserve meaning and structure.
+1. Ground chunk_text in the extracted text above, not the image.
+- Where a chunk's content appears in the extracted text above, copy chunk_text verbatim from it (joining a word split across a line-wrapped hyphen back together). Do not paraphrase, reword, summarize, or "clean up" phrasing that is already given to you verbatim.
+- Use the page images only to decide layout, reading order across columns, headings, table structure, figure boundaries, and content_type -- not to re-transcribe text you already have verbatim above.
+- If a passage genuinely isn't in the extracted text (a page with no text layer, or text embedded inside a figure/image), transcribe it from the image as accurately as you can and say so in source_notes.
+
+2. Preserve meaning and structure.
 - Do not summarize aggressively.
 - Do not omit important conditions, exceptions, footnotes, warnings, tables, or clauses.
 - Preserve the source document's original language; do not translate unless the document itself already contains translated text.
 
-2. Use a 3-level heading hierarchy for every chunk.
+3. Use a 3-level heading hierarchy for every chunk.
 - level_1_heading: document or top-level title
 - level_2_heading: major section
 - level_3_heading: specific topic or subtopic
 - If headings are visually implied but not explicit, infer them conservatively from the page layout.
 
-3. Handle tables carefully.
+4. Handle tables carefully.
 - Do not flatten tables into unreadable text.
 - For each logical table, preserve column headers.
 - If a table has multiple rows with materially different content, create one chunk per logical row or row group.
 - Each table chunk must repeat the table title and column headers so it can stand alone.
 - If a table continues from a previous page or batch, use previous context to preserve continuity.
 
-4. Handle boxed sections and footnotes.
+5. Handle boxed sections and footnotes.
 - Treat boxed sections as meaningful layout units.
 - Preserve caution notes, exceptions, limits, conditions, and warnings.
 - Link footnotes to the relevant content when possible.
 
-5. Handle multi-page continuity.
+6. Handle multi-page continuity.
 - If content continues from the previous batch, mark continuation_status as "continues".
 - If this chunk starts new content, mark continuation_status as "new".
 - If uncertain, mark continuation_status as "partial".
 
-6. Avoid useless chunks.
+7. Avoid useless chunks.
 - Exclude page numbers, repeated headers, repeated footers, watermarks, and table of contents unless they contain substantive information.
 - Do not create chunks from empty or decorative content.
 - Avoid chunks shorter than 2 meaningful lines unless the content is a critical condition, rate, fee, or warning.
 
-7. Make chunks retrieval-friendly.
+8. Make chunks retrieval-friendly.
 Each chunk should be understandable by itself.
 Include enough context in the chunk_text so that a RAG system can answer questions without needing the entire page.
 
@@ -108,9 +118,15 @@ def build_prompt(
     previous_batch_summary: str,
     previous_last_chunk: str,
     previous_heading_hierarchy: dict[str, Any],
+    extracted_page_text: str = "",
     template: str = PROMPT_TEMPLATE,
 ) -> str:
     """Fill `template` with per-batch context.
+
+    `extracted_page_text` (see `vich.parsing.extract_page_text`) is the
+    PDF's own text layer for this batch's pages, given to the model as
+    grounding so chunk_text can be copied verbatim instead of re-typed from
+    the image; pass "" for scanned/image-only PDFs with no text layer.
 
     A custom `template` may be supplied to add domain-specific instructions
     (e.g. "this is a financial disclosure document...") while keeping the
@@ -127,6 +143,7 @@ def build_prompt(
             previous_heading_hierarchy or {},
             ensure_ascii=False,
         ),
+        "{{extracted_page_text}}": extracted_page_text or "(no text layer for this page range)",
     }
 
     prompt = template

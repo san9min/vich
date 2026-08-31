@@ -26,6 +26,14 @@ Each chunk's heading labels are flat (`level_1/2/3_heading` strings); `vich`
 separately assembles them into a document-wide heading tree — see
 [Outline](#outline) below.
 
+The VLM also gets the PDF's own extracted text (via PyMuPDF) alongside the
+page images, and is told to copy `chunk_text` verbatim from it — the
+images are for layout/structure decisions, not re-transcribing text the
+model already has exactly. Without this, dense sentences drift into
+paraphrasing (an LLM "reading" an image tends to summarize, not
+transcribe); see [`examples/README.md`](examples/README.md) for a
+before/after.
+
 ## Project structure
 
 ```text
@@ -92,8 +100,9 @@ uv run vich outline examples/docling_example.jsonl
   - Introduction
     - Overview and Features (1 chunk)
   - Design and Architecture
-    - Docling Document (1 chunk)
+    - Docling Document Data Model (1 chunk)
     - Parser Backends (1 chunk)
+    - Pipelines (1 chunk)
     ...
 ```
 
@@ -113,10 +122,16 @@ it, plus the document outline linking down to each one.
 
 - **`page_start`/`page_end` aren't fully reliable.** They come from the
   VLM's own self-reported labels for each chunk, and on the example paper
-  in [`examples/`](examples/) nearly half the chunks (7 of 16) are off by
-  a page. If you need precise page citations, verify them rather than
-  trusting them outright — see the note in
-  [`examples/README.md`](examples/README.md) for how this was found.
+  in [`examples/`](examples/) several chunks are off by a page. If you need
+  precise page citations, verify them rather than trusting them outright —
+  see the note in [`examples/README.md`](examples/README.md) for how this
+  was found. (Text-grounding chunk_text against the PDF's extracted text
+  fixed *wording* fidelity; it doesn't fix page attribution, which is a
+  separate self-reported field.)
+- **Chunk boundaries and `content_type` choices vary between runs** on the
+  same PDF, since they're still an LLM's judgment call, not a deterministic
+  rule. Re-running `vich parse` on the same file won't reproduce byte-for-byte
+  identical output.
 
 ## Roadmap
 
@@ -124,6 +139,7 @@ it, plus the document outline linking down to each one.
       bank/document data, keep the layout-aware chunking approach)
 - [x] Docs + example PDF walkthrough
 - [x] Document outline (`vich.outline`)
+- [x] Ground chunk_text in the PDF's extracted text (reduce paraphrasing)
 - [ ] Pluggable VLM backend (OpenAI-compatible today; others later)
 - [ ] More reliable per-chunk page attribution
 - [ ] Publish to PyPI

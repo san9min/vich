@@ -3,6 +3,7 @@
 from vich.parsing.pdf_renderer import (
     PageImage,
     count_pages,
+    extract_page_text,
     render_pdf_pages_to_base64,
     safe_stem,
     slugify,
@@ -11,6 +12,7 @@ from vich.parsing.pdf_renderer import (
 __all__ = [
     "PageImage",
     "count_pages",
+    "extract_page_text",
     "render_pdf_pages_to_base64",
     "safe_stem",
     "slugify",
