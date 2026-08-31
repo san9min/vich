@@ -109,12 +109,23 @@ actual JSONL chunks vich produces from it, and a
 source page with a box (and cropped image) for every chunk extracted from
 it, plus the document outline linking down to each one.
 
+## Known limitations
+
+- **`page_start`/`page_end` aren't fully reliable.** They come from the
+  VLM's own self-reported labels for each chunk, and on the example paper
+  in [`examples/`](examples/) nearly half the chunks (7 of 16) are off by
+  a page. If you need precise page citations, verify them rather than
+  trusting them outright — see the note in
+  [`examples/README.md`](examples/README.md) for how this was found.
+
 ## Roadmap
 
 - [x] Port and generalize the VLM chunking pipeline (drop domain-specific
       bank/document data, keep the layout-aware chunking approach)
 - [x] Docs + example PDF walkthrough
+- [x] Document outline (`vich.outline`)
 - [ ] Pluggable VLM backend (OpenAI-compatible today; others later)
+- [ ] More reliable per-chunk page attribution
 - [ ] Publish to PyPI
 
 ## License

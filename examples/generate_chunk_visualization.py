@@ -18,6 +18,13 @@ text, so only its caption matches -- the region is nudged upward to the
 nearest preceding text block so the box/crop actually includes the figure,
 not just its caption line.
 
+The search isn't limited to a chunk's own declared page_start/page_end,
+either: the VLM's self-reported page numbers are sometimes off by a page
+or two (observed on this very example -- almost half its chunks), so each
+chunk is matched against a small window of nearby pages and shown wherever
+the match actually lands, with a note on the card when that differs from
+what vich labeled it.
+
 This only works for text-based PDFs, some chunks (especially short,
 heavily-paraphrased ones) won't get a confident match at all, and it's
 purely a docs/demo convenience -- it is not part of the vich package or its
@@ -204,16 +211,7 @@ def _extend_figure_region_upward(page: fitz.Page, rect: fitz.Rect, max_extend: f
     return fitz.Rect(rect.x0, new_top, rect.x1, rect.y1)
 
 
-def estimate_chunk_regions(page: fitz.Page, chunk: dict, min_region_size: int = 3) -> list[fitz.Rect]:
-    """Best-effort bounding rect(s) for where `chunk` lives on `page`. May
-    return zero (no confident match), one, or several rects (e.g. a
-    paragraph that continues across a two-column break)."""
-    rects = _match_word_rects(page, chunk)
-    regions = [r for r in _split_into_regions(rects) if len(r) >= min_region_size]
-
-    if sum(len(r) for r in regions) < MIN_MATCHED_WORDS:
-        return []
-
+def _regions_to_boxes(page: fitz.Page, chunk: dict, regions: list[list[Rect]]) -> list[fitz.Rect]:
     boxes = []
     for region in regions:
         x0 = min(r[0] for r in region)
@@ -226,6 +224,41 @@ def estimate_chunk_regions(page: fitz.Page, chunk: dict, min_region_size: int = 
         boxes[0] = _extend_figure_region_upward(page, boxes[0])
 
     return boxes
+
+
+def find_best_page_and_regions(
+    doc: fitz.Document, chunk: dict, search_radius: int = 3, min_region_size: int = 3
+) -> tuple[int | None, list[fitz.Rect]]:
+    """Search pages near `chunk`'s declared page_start/page_end for the one
+    with the strongest text match, and return (page_num, regions) for it.
+
+    The VLM's own self-reported page numbers are sometimes off by a page or
+    two (observed on this very example -- a chunk about "Parser Backends"
+    labeled page 2 whose text actually lives on page 3), so trusting the
+    declared page alone silently produces "no match" for a chunk that's
+    perfectly matchable one page over. Ties are broken by matched-word
+    count, not by proximity to the declared page, since a real match
+    dominates a coincidental one by a wide margin in practice.
+    """
+    declared_start = chunk["page_start"]
+    declared_end = chunk.get("page_end") or declared_start
+    lo = max(1, declared_start - search_radius)
+    hi = min(doc.page_count, declared_end + search_radius)
+
+    best_page, best_regions, best_count = None, [], MIN_MATCHED_WORDS - 1
+    for page_num in range(lo, hi + 1):
+        page = doc.load_page(page_num - 1)
+        rects = _match_word_rects(page, chunk)
+        regions = [r for r in _split_into_regions(rects) if len(r) >= min_region_size]
+        count = sum(len(r) for r in regions)
+        if count > best_count:
+            best_page, best_count = page_num, count
+            best_regions = regions
+
+    if best_page is None:
+        return None, []
+
+    return best_page, _regions_to_boxes(doc.load_page(best_page - 1), chunk, best_regions)
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +360,9 @@ def heading_breadcrumb(chunk: dict) -> str:
     return " &rsaquo; ".join(html.escape(p) for p in parts)
 
 
-def chunk_card_html(number: int, chunk: dict, thumbnails: list[Image.Image]) -> str:
+def chunk_card_html(
+    number: int, chunk: dict, thumbnails: list[Image.Image], mismatch_page: int | None = None
+) -> str:
     content_type = chunk.get("content_type") or "mixed"
     color = CONTENT_TYPE_COLORS.get(content_type, "#666666")
     body = (
@@ -342,6 +377,12 @@ def chunk_card_html(number: int, chunk: dict, thumbnails: list[Image.Image]) -> 
         for t in thumbnails
     )
     thumbs_block = f'<div class="thumbs">{thumbs_html}</div>' if thumbs_html else ""
+    mismatch_html = (
+        f'<div class="mismatch">&#9888; vich labeled this chunk page {chunk["page_start"]}, '
+        f"but its text actually matches page {mismatch_page} &mdash; shown there instead.</div>"
+        if mismatch_page is not None
+        else ""
+    )
 
     return f"""
     <div class="chunk-card" id="chunk-{number}" style="--accent: {color}">
@@ -351,6 +392,7 @@ def chunk_card_html(number: int, chunk: dict, thumbnails: list[Image.Image]) -> 
         <code class="chunk-id">{html.escape(chunk['chunk_id'])}</code>
       </div>
       <div class="breadcrumb">{heading_breadcrumb(chunk)}</div>
+      {mismatch_html}
       {thumbs_block}
       <div class="chunk-body">{body}</div>
       {keywords_html}
@@ -381,23 +423,39 @@ def build() -> None:
     doc = fitz.open(PDF_PATH)
     raw_chunks = load_chunks(JSONL_PATH)
     numbered_chunks = list(enumerate(raw_chunks, start=1))
+    chunk_by_number = dict(numbered_chunks)
     chunk_numbers = {c["chunk_id"]: n for n, c in numbered_chunks}
 
     outline_nodes = build_outline(Chunk.model_validate(c) for c in raw_chunks)
+
+    # Pass 1: find each chunk's best-matching page (which may differ from
+    # its declared page_start -- see find_best_page_and_regions) up front,
+    # since a card grouped under its declared page may need a crop sourced
+    # from a different page's rendered image.
+    chunk_match = {n: find_best_page_and_regions(doc, c) for n, c in numbered_chunks}
+
+    base_images: dict[int, Image.Image] = {}
+
+    def get_base_image(page_num: int) -> Image.Image:
+        if page_num not in base_images:
+            base_images[page_num] = render_page_base(doc.load_page(page_num - 1))
+        return base_images[page_num]
 
     pages_html = []
     try:
         for page_index in range(doc.page_count):
             page_num = page_index + 1
-            page = doc.load_page(page_index)
-            page_chunks = [
-                (n, c) for n, c in numbered_chunks if c["page_start"] <= page_num <= c["page_end"]
-            ]
+            base_image = get_base_image(page_num)
 
-            base_image = render_page_base(page)
-            chunk_regions = {n: estimate_chunk_regions(page, c) for n, c in page_chunks}
+            # Cards are grouped under each chunk's *first* declared page (a
+            # multi-page chunk would otherwise get one duplicate <div id=...>
+            # card per page it spans); boxes are drawn on whichever page(s)
+            # the chunk actually matched, which may be neither.
+            declared_here = [(n, c) for n, c in numbered_chunks if c["page_start"] == page_num]
+            matched_here = [(n, chunk_by_number[n]) for n, (mp, _r) in chunk_match.items() if mp == page_num]
+            regions_here = {n: chunk_match[n][1] for n, _c in matched_here}
 
-            boxed_image = compose_boxed_image(base_image, page_chunks, chunk_regions)
+            boxed_image = compose_boxed_image(base_image, matched_here, regions_here)
             image_b64 = image_to_base64_png(boxed_image)
 
             ASSETS_DIR.mkdir(exist_ok=True)
@@ -406,9 +464,13 @@ def build() -> None:
             cards = (
                 "\n".join(
                     chunk_card_html(
-                        n, c, [crop_region(base_image, rect) for rect in chunk_regions.get(n, [])]
+                        n,
+                        c,
+                        [crop_region(get_base_image(mp), rect) for rect in regions] if mp else [],
+                        mismatch_page=mp if mp and mp != c["page_start"] else None,
                     )
-                    for n, c in page_chunks
+                    for n, c in declared_here
+                    for mp, regions in [chunk_match[n]]
                 )
                 or "<p class='empty'>No chunks.</p>"
             )
@@ -484,6 +546,7 @@ def build() -> None:
   .badge {{ color: white; font-size: 0.72rem; font-weight: 600; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.02em; }}
   .chunk-id {{ font-size: 0.75rem; color: var(--muted); }}
   .breadcrumb {{ font-size: 0.8rem; color: var(--muted); margin-bottom: 8px; }}
+  .mismatch {{ font-size: 0.76rem; color: #a35b00; background: rgba(201,133,43,0.12); border-radius: 4px; padding: 4px 8px; margin-bottom: 8px; }}
   .thumbs {{ display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }}
   .thumbs .thumb {{ max-width: 100%; max-height: 160px; border: 1px solid var(--border); border-radius: 4px; display: block; }}
   .chunk-body p {{ margin: 0; line-height: 1.5; font-size: 0.92rem; white-space: pre-wrap; }}
@@ -501,7 +564,7 @@ def build() -> None:
 <body>
   <h1>ViCH chunk visualization</h1>
   <p class="subtitle">examples/docling_example.pdf &rarr; {len(raw_chunks)} chunks. Numbered boxes on the page match the numbered cards on the right.</p>
-  <p class="caveat">Boxes/crops are estimated by matching each chunk's text back onto the PDF's text layer (vich's chunk schema has no bounding boxes) &mdash; a docs-only convenience, not part of vich's output. Some chunks don't get a confident enough match to draw. The outline below, though, <em>is</em> a real vich feature (see <code>vich.outline</code>).</p>
+  <p class="caveat">Boxes/crops are estimated by matching each chunk's text back onto the PDF's text layer (vich's chunk schema has no bounding boxes) &mdash; a docs-only convenience, not part of vich's output. A chunk is searched for near its declared page, not only on it, since the VLM's self-reported page numbers are sometimes off by one (flagged on the card when that happens); some chunks still won't get a confident enough match to draw. The outline below, though, <em>is</em> a real vich feature (see <code>vich.outline</code>).</p>
   <div class="legend">{legend}</div>
   <div class="outline">
     <h2>Document outline</h2>

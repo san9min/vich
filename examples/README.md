@@ -82,6 +82,15 @@ keywords.
 > heavily-paraphrased chunks won't get a confident enough match to draw at
 > all, and it's not part of what `vich parse` outputs. (The outline above
 > *is* part of vich's actual output, not a docs convenience.)
+>
+> The search also isn't limited to a chunk's own declared `page_start` —
+> **7 of this example's 16 chunks are labeled with the wrong page** by the
+> VLM itself (e.g. the "Parser Backends" chunk is labeled page 2; its text
+> is actually on page 3), so each chunk is matched against a small window
+> of nearby pages and shown wherever it actually lands, with a note on the
+> card when that differs from vich's own label. That's a real accuracy
+> limitation of the current chunker worth knowing about if you depend on
+> `page_start`/`page_end` for precise citations.
 
 ![Chunk visualization: page 2 of the Docling paper, with a box around the entire figure (not just its caption) and around a paragraph chunk](assets/docling_page_2.png)
 
