@@ -37,6 +37,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="VLM model id. Defaults to the VICH_VLM_MODEL env var.",
     )
     parse_cmd.add_argument(
+        "--outline-model",
+        default=None,
+        help="Model for the one-off whole-document heading-structure pass that each "
+        "chunking batch then classifies against (see the README's 'Two-stage design' "
+        "note). Defaults to --model; pass a stronger model here if headings come out "
+        "wrong -- getting this pass right matters more than any single chunking batch.",
+    )
+    parse_cmd.add_argument(
         "--batch-size",
         type=int,
         default=2,
@@ -74,6 +82,7 @@ def main(argv: list[str] | None = None) -> None:
                 raw_dir=args.path,
                 output_dir=args.output_dir,
                 model=args.model,
+                outline_model=args.outline_model,
                 batch_size=args.batch_size,
                 zoom=args.zoom,
                 overwrite=args.overwrite,
@@ -84,6 +93,7 @@ def main(argv: list[str] | None = None) -> None:
                 pdf_path=args.path,
                 output_dir=args.output_dir,
                 model=args.model,
+                outline_model=args.outline_model,
                 batch_size=args.batch_size,
                 zoom=args.zoom,
                 overwrite=args.overwrite,

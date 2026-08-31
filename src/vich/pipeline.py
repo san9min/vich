@@ -3,6 +3,17 @@
 Ported from mafio/data/preprocess.py (process_pdf, process_raw_pdfs),
 generalized to drop the hardcoded bank-document `SOURCE_URLS` lookup: pass
 `source_url` explicitly per document instead.
+
+Two-stage design: `process_pdf` first calls
+`vich.chunking.outline_extraction.extract_document_outline` once for the
+whole document, then runs the batch-by-batch chunking loop as before, with
+each batch's prompt now anchored to that outline instead of inventing
+heading hierarchy fresh per batch. See `vich.chunking.prompt`'s module
+docstring for why: re-deriving hierarchy independently in every batch let
+the same section come back worded differently across batches, which broke
+grouping chunks under it after the fact (`vich.outline.build_outline`) --
+that's now handled by classification against an already-settled list
+instead.
 """
 
 from __future__ import annotations
@@ -10,13 +21,13 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
 
 from openai import OpenAI
 from tqdm import tqdm
 
 from vich.chunking.client import call_vlm_chunker
 from vich.chunking.normalize import IdResolver, default_id_resolver, normalize_chunk
+from vich.chunking.outline_extraction import extract_document_outline, render_known_outline_text
 from vich.chunking.recovery import find_missed_blocks
 from vich.parsing.pdf_renderer import (
     count_pages,
@@ -35,6 +46,7 @@ def process_pdf(
     pdf_path: Path,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     model: str | None = None,
+    outline_model: str | None = None,
     batch_size: int = 2,
     zoom: float = 2.0,
     overwrite: bool = False,
@@ -43,10 +55,20 @@ def process_pdf(
 ) -> Path:
     """Chunk one PDF and write it as `<output_dir>/<document_id>.jsonl`.
 
-    Pages are processed in batches of `batch_size`; each batch is rendered
-    to images, sent to the VLM chunker, and the resulting chunks are
-    normalized and appended. Heading hierarchy and a short summary carry
-    over between batches so chunking stays consistent across page breaks.
+    Stage 1 (once): the whole document's pages + extracted text go to
+    `extract_document_outline` in a single call, which returns only a
+    heading structure (small output), not content -- establishing a
+    canonical, exact-wording list of headings before any chunking happens.
+    `outline_model` lets this stage use a different (e.g. stronger) model
+    than the per-batch chunking in stage 2; defaults to `model`.
+
+    Stage 2 (per batch): pages are processed in batches of `batch_size`,
+    each rendered to images and sent to the VLM chunker alongside that
+    page range's own extracted text and the stage-1 outline, and the
+    resulting chunks are normalized and appended. A short summary still
+    carries forward between batches for local continuity (e.g. judging
+    continuation_status), but cross-batch *heading* consistency now comes
+    from the shared stage-1 outline rather than a per-batch carry-forward.
 
     `batch_size` defaults small (2) because a bigger batch means a longer
     prompt (more page images plus more extracted text), and a longer
@@ -59,6 +81,7 @@ def process_pdf(
     resolved_model = model or os.getenv("VICH_VLM_MODEL")
     if not resolved_model:
         raise ValueError("Missing model. Pass `model=` or set VICH_VLM_MODEL.")
+    resolved_outline_model = outline_model or resolved_model
 
     document_id = safe_stem(pdf_path)
     source = pdf_path.stem
@@ -70,9 +93,24 @@ def process_pdf(
 
     total_pages = count_pages(pdf_path)
 
+    print(f"Extracting document outline for {source}...")
+    outline_page_images = render_pdf_pages_to_base64(
+        pdf_path=pdf_path, page_start=1, page_end=total_pages, zoom=zoom
+    )
+    outline_source_text = extract_page_text(pdf_path=pdf_path, page_start=1, page_end=total_pages)
+    raw_outline = extract_document_outline(
+        client=client,
+        model=resolved_outline_model,
+        document_id=document_id,
+        source=source,
+        page_images=outline_page_images,
+        extracted_text=outline_source_text,
+    )
+    known_outline = render_known_outline_text(raw_outline)
+    print(known_outline or "(no outline extracted)")
+
     previous_batch_summary = ""
     previous_last_chunk = ""
-    previous_heading_hierarchy: dict[str, Any] = {}
     all_chunks: list[Chunk] = []
 
     for page_start in tqdm(range(1, total_pages + 1, batch_size), desc=f"Processing {source}"):
@@ -96,8 +134,8 @@ def process_pdf(
             page_images=page_images,
             previous_batch_summary=previous_batch_summary,
             previous_last_chunk=previous_last_chunk,
-            previous_heading_hierarchy=previous_heading_hierarchy,
             extracted_page_text=page_text,
+            known_outline=known_outline,
         )
 
         raw_chunks = batch_result.get("chunks") or []
@@ -154,9 +192,6 @@ def process_pdf(
             )
 
         previous_batch_summary = batch_result.get("batch_summary") or previous_batch_summary
-        previous_heading_hierarchy = (
-            batch_result.get("heading_hierarchy") or previous_heading_hierarchy
-        )
 
         if raw_chunks:
             previous_last_chunk = json.dumps(raw_chunks[-1], ensure_ascii=False)
@@ -174,6 +209,7 @@ def process_documents(
     raw_dir: Path,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     model: str | None = None,
+    outline_model: str | None = None,
     batch_size: int = 2,
     zoom: float = 2.0,
     overwrite: bool = False,
@@ -211,6 +247,7 @@ def process_documents(
                     pdf_path=pdf_path,
                     output_dir=output_dir,
                     model=resolved_model,
+                    outline_model=outline_model,
                     batch_size=batch_size,
                     zoom=zoom,
                     overwrite=overwrite,

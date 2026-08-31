@@ -17,8 +17,9 @@ figures, and a real benchmark table.
 
 - [`docling_example.pdf`](docling_example.pdf) — the input paper
 - [`docling_example.jsonl`](docling_example.jsonl) — actual output from
-  `vich parse examples/docling_example.pdf`, using `gpt-4.1-mini`
-  (33 chunks from 8 pages, `batch_size=2`, including 1 auto-recovered chunk)
+  `vich parse examples/docling_example.pdf`, using `gpt-4.1-mini` for both
+  stages (29 chunks from 8 pages, `batch_size=2`, including 2 auto-recovered
+  chunks)
 - [`chunk_visualization.html`](chunk_visualization.html) — open this in a
   browser: a document outline linking to every chunk, and each source page
   **with a numbered box + cropped image for every chunk vich found on it**,
@@ -28,8 +29,9 @@ figures, and a real benchmark table.
 
 Re-running `vich parse` won't reproduce this exact JSONL byte-for-byte —
 chunk boundaries and content-type choices can vary slightly run to run —
-but chunk *wording* should stay close to verbatim, and dropped content
-(when it happens) should get recovered rather than silently lost; see below.
+but chunk *wording* and *heading labels* should both stay close to
+verbatim/consistent, and dropped content (when it happens) should get
+recovered rather than silently lost; see below.
 
 ## Reproducing
 
@@ -42,7 +44,7 @@ python examples/generate_chunk_visualization.py
 open examples/chunk_visualization.html
 ```
 
-## Four fixes this example surfaced, in order
+## Five fixes this example surfaced, in order
 
 **1. Chunk text is grounded in the PDF's own text, not re-typed from the
 image.** An early version showed the VLM paraphrasing dense sentences —
@@ -75,22 +77,21 @@ now checks coverage **per paragraph-ish block** (PyMuPDF's own layout
 segmentation) instead of per batch, and inserts a fallback chunk built
 from any block's exact text that the VLM's own chunks don't cover — see
 `vich.chunking.recovery.find_missed_blocks` and the "Content recovery"
-section of the [root README](../README.md#content-recovery). On the run
-behind this JSONL, that caught a block the model skipped on page 1 (the
-author list) — `docling_example_7`, `content_type: "paragraph"`,
+section of the [root README](../README.md#content-recovery). Two blocks
+got caught this way on the run behind this JSONL: the author list on page
+1 (`docling_example_7`) and a sentence about the RHEL AI distribution on
+page 7 (`docling_example_28`) — both `content_type: "paragraph"`,
 `source_notes` starting `"Auto-recovered: ..."`.
 
 **4. (Visualization-only) A chunk spanning a page break needs a box on
 *both* pages, not one.** Batching more than one page into a single VLM
 call exists specifically so content isn't artificially split just because
-of where a page ends — and it works: `docling_example_3`'s chunk_text
-correctly merges the tail of page 1 ("...susceptibility to hallucinations,
-conversion quality...") with the start of page 2 ("The most popular
-conversion tools today leverage vision-language models...") into one
-coherent chunk. But the visualization's page-matching originally picked a
-single "best" page per chunk, so a genuinely 2-page chunk showed a box on
-only one of them — the other page's share looked abandoned, even though
-`vich parse` had merged it correctly. `find_matching_pages` in
+of where a page ends — and it works: one chunk's text correctly merges
+the tail of page 1 with the start of page 2 into one coherent chunk. But
+the visualization's page-matching originally picked a single "best" page
+per chunk, so a genuinely 2-page chunk showed a box on only one of them —
+the other page's share looked abandoned, even though `vich parse` had
+merged it correctly. `find_matching_pages` in
 `generate_chunk_visualization.py` now tries several anchor points through
 a chunk's own text (not just its first word) when matching a page, and
 adds a second page when the winning page's match starts well into the
@@ -101,10 +102,32 @@ pages during testing, which is why it's this specific and not just "any
 overlap." This was never a `vich` pipeline bug; the chunking was already
 correct; only the box-drawing script needed to catch up.
 
+**5. Re-deriving heading hierarchy independently in every batch was itself
+the deeper problem — not just prompt size.** Even with fixes 1-4 in place,
+the same section could still come back worded differently across batches
+(e.g. "Parser Backends" nested one way in one run, flattened differently
+in another), which breaks grouping chunks under it after the fact.
+`vich parse` now runs a **two-stage pipeline** (see the root README's
+[Two-stage design](../README.md#two-stage-design)): stage 1 reads the
+whole document once and returns *only* its heading structure; stage 2
+then classifies each batch's chunks against that already-settled list
+instead of inventing hierarchy fresh. The very first attempt at this
+surfaced its own bug immediately: stage 1 missed the paper's unnumbered
+"Abstract" heading (it isn't a numbered section like "1 Introduction"),
+and stage 2 responded by folding the entire Abstract into a single
+4,020-character chunk labeled "1 Introduction" alongside the real
+introduction and feature list — technically still verbatim text, but a
+real granularity regression, and the opposite of what fix 3 was trying to
+achieve. Fixed by naming unnumbered front-matter sections explicitly in
+stage 1's prompt, and stating directly in stage 2's prompt that
+heading-matching never reduces how many chunks a page gets. Re-run after
+the fix: "Abstract" appears in the outline, and the same content is 4
+appropriately-sized chunks again.
+
 ## Document outline
 
 `vich.outline` (a real library feature, not a docs-only script — see the
-[root README](../README.md#outline)) assembles all 33 chunks' flat
+[root README](../README.md#outline)) assembles all 29 chunks' flat
 `level_1/2/3_heading` labels into a tree:
 
 ```bash
@@ -114,17 +137,28 @@ uv run vich outline examples/docling_example.jsonl
 ```text
 - Docling: An Efficient Open-Source Toolkit for AI-driven Document Conversion
   - Abstract (1 chunk)
-  - Introduction (1 chunk)
-    - Features (1 chunk)
-  - State of the Art (2 chunks)
-  - Design and Architecture (2 chunks)
-    - Docling Document (2 chunks)
-  - Parser Backends
-    - Parser Backends (1 chunk)
-    - PDF Backends (1 chunk)
-    - Other Backends (1 chunk)
+  - 1 Introduction (2 chunks)
+  - 2 State of the Art (2 chunks)
+  - 3 Design and Architecture (2 chunks)
+    - 3.1 Docling Document (1 chunk)
+    - 3.2 Parser Backends (3 chunks)
+    - 3.3 Pipelines (1 chunk)
+  - 4 PDF Conversion Pipeline (1 chunk)
+    - 4.1 AI Models (5 chunks)
+  - 5 Performance (1 chunk)
+    - 5.1 Benchmark Dataset (1 chunk)
+    - 5.2 System Configurations (1 chunk)
+    - 5.3 Benchmarking Methodology (2 chunks)
+    - 5.4 Results (1 chunk)
   ...
 ```
+
+Every one of these headings is copied verbatim (including section numbers
+like "3.2") from the stage-1 outline extracted once for the whole
+document — that consistency is what fix 5 above was about, and it's why
+"3.2 Parser Backends" here reliably groups all 3 of its chunks even though
+they came out of the same batch call, unlike the pre-fix-5 runs where a
+heading's exact wording could drift between separate batches.
 
 The visualization's "Document outline" section renders the same tree, with
 each heading linking down to its chunk's card — and each title colored by
@@ -155,12 +189,17 @@ label repeats which batch it's part of. That's the mechanism fix 4 above
 depends on: pages inside the same batch are exactly the ones a chunk can
 legitimately continue across, since they were all in the same VLM call.
 
-![Chunk visualization: page 1 of the Docling paper, with a distinct color per section — Abstract, Introduction, State of the Art — so neighboring sections are immediately distinguishable](assets/docling_page_1.png)
+![Chunk visualization: page 1 of the Docling paper, with the Abstract, "1 Introduction" (both columns, same color), and "2 State of the Art" each getting a distinct color, plus the recovered author-list chunk at the top](assets/docling_page_1.png)
 
 Every block of text on this page is claimed by a box, including the author
-list at the top (chunk 8, magenta — "Design and Architecture," where its
-first real chunk lands) — the one this run's recovery mechanism caught
-after the VLM's own chunking skipped it.
+list at the top (the recovered chunk, magenta — "3 Design and
+Architecture," where its first real chunk lands) that this run's recovery
+mechanism caught after the VLM's own chunking skipped it. Notice the two
+boxes on "1 Introduction" — one per column — share the exact same color:
+that's fix 5, not fix 4's page-spanning logic (this chunk doesn't cross a
+page break; it crosses a *column* break on the same page), but the same
+underlying point applies — content that's really one section reads as one
+section visually, regardless of the PDF layout accident that split it.
 
 > **Note:** `vich`'s chunk schema has no bounding-box field — the VLM
 > reasons over the whole page image and returns text, not coordinates. The
@@ -177,10 +216,10 @@ after the VLM's own chunking skipped it.
 > part of vich's actual output — not a docs convenience.)
 >
 > The search also isn't limited to a chunk's own declared `page_start` —
-> **2 of this example's 33 chunks are labeled with the wrong page** by the
-> VLM itself, so each chunk is matched against a small window of nearby
-> pages and shown wherever it actually lands, with a note on the card when
-> that differs from vich's own label. That's a real accuracy limitation of
-> the current chunker worth knowing about if you depend on
-> `page_start`/`page_end` for precise citations — none of the three fixes
-> above touch page attribution, which is a separate self-reported field.
+> **a couple of this example's 29 chunks are labeled with the wrong page**
+> by the VLM itself, so each chunk is matched against a small window of
+> nearby pages and shown wherever it actually lands, with a note on the
+> card when that differs from vich's own label. That's a real accuracy
+> limitation of the current chunker worth knowing about if you depend on
+> `page_start`/`page_end` for precise citations — none of the fixes above
+> touch page attribution, which is a separate self-reported field.

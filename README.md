@@ -43,19 +43,73 @@ chunk built from any block's verbatim text that the VLM's own chunks don't
 cover — see [`examples/README.md`](examples/README.md) for this caught
 live on a real run.
 
+Chunking itself is a **two-stage pipeline** — see [Two-stage design](#two-stage-design)
+below for why: cramming "invent this document's heading hierarchy" and
+"transcribe this batch's content" into the same per-batch call was itself
+a source of inconsistency (the same section coming back worded
+differently across batches), not just a prompt-size problem.
+
+## Two-stage design
+
+Earlier versions asked one VLM call to *simultaneously* invent heading
+hierarchy, transcribe body text verbatim, classify content_type, and
+extract keywords, for a growing batch of pages — and re-deriving the
+hierarchy fresh in every batch meant the same section could come back
+worded slightly differently between batches (observed in practice:
+"Parser Backends" nested one way in one run, flattened differently in
+another), which broke grouping chunks under it after the fact.
+
+`process_pdf` now runs two stages:
+
+1. **Once per document**, `vich.chunking.outline_extraction.extract_document_outline`
+   reads every page (images + extracted text) and returns *only* the
+   heading structure — no content, no chunk_text, a small output — so
+   nothing about it is likely to get dropped the way a batch's content
+   sometimes does.
+2. **Per batch**, `vich.chunking.client.call_vlm_chunker` gets that outline
+   as context and *classifies* each chunk's heading against it (copy the
+   exact wording of the matching entry) instead of inventing one. This is
+   a much easier, more consistent task than re-deriving hierarchy from
+   scratch — and it means a chunk whose section spans a page or batch
+   break doesn't need to be merged into one physical chunk_text to "belong
+   together": as long as its heading matches an earlier chunk's exactly,
+   `vich.outline.build_outline` groups them correctly after the fact, even
+   across completely different batches.
+
+Pass `--outline-model` (CLI) / `outline_model=` (library) to use a
+different — e.g. stronger — model for stage 1 than stage 2; getting the
+outline right matters more than any single chunking batch, since every
+batch depends on it. Both default to the same model.
+
+This isn't free of failure modes either: if stage 1 misses a real
+section (an unnumbered "Abstract" before "1 Introduction" was missed on
+an early attempt), stage 2 can either invent a heading for that content
+per rule 2's fallback, or — observed once — fold it wholesale into an
+adjacent numbered section instead of giving it its own chunk. The prompt
+now calls out common unnumbered front-matter sections explicitly and
+states that heading-matching never reduces how many chunks a page gets,
+but stage 1 is still a single VLM call making a judgment, not a
+guarantee.
+
 ## Project structure
 
 ```text
 vich/
 ├── src/vich/
-│   ├── parsing/         # PDF -> page images (PyMuPDF-based rendering)
-│   ├── chunking/        # VLM prompt + chunk extraction/normalization
-│   ├── schema.py        # Chunk / output data models (pydantic)
-│   ├── outline.py        # Assemble chunks' flat headings into a tree
-│   ├── pipeline.py       # Batch PDF -> JSONL orchestration
-│   └── cli.py            # `vich` command-line entrypoint
+│   ├── parsing/                    # PDF -> page images/text (PyMuPDF-based)
+│   ├── chunking/
+│   │   ├── outline_extraction.py    # Stage 1: whole-document heading structure
+│   │   ├── prompt.py                 # Stage 2: per-batch chunking prompt
+│   │   ├── client.py                 # VLM call + JSON extraction
+│   │   ├── normalize.py              # Raw VLM chunk -> Chunk
+│   │   ├── coverage.py               # Word-overlap primitives
+│   │   └── recovery.py               # Detect + repair content a batch dropped
+│   ├── schema.py                    # Chunk / output data models (pydantic)
+│   ├── outline.py                    # Assemble *produced* chunks' headings into a tree
+│   ├── pipeline.py                   # Two-stage orchestration -> JSONL
+│   └── cli.py                        # `vich` command-line entrypoint
 ├── tests/
-├── examples/              # Sample PDFs + expected output for docs
+├── examples/                          # Sample PDFs + expected output for docs
 ├── pyproject.toml
 └── LICENSE (MIT)
 ```
@@ -96,9 +150,16 @@ entities, and a precomposed `embedding_text` ready for a vector store.
 
 ## Outline
 
-`vich parse` gives every chunk a flat heading label; `vich.outline` builds
-the document-wide tree from those labels as a separate, free (no VLM call)
-step over already-produced chunks:
+Two different things share the name "outline" in this codebase, deliberately
+related but not the same:
+
+- `vich.chunking.outline_extraction` (stage 1 above) runs *before*
+  chunking, from the page images/text, to establish the heading structure
+  chunking will use.
+- `vich.outline` runs *after* chunking, for free (no VLM call), over
+  already-produced chunks' flat `level_1/2/3_heading` labels — it's what
+  turns "every chunk under 'Ecosystem' happens to say 'Ecosystem'
+  identically" into an actual tree you can navigate or print:
 
 ```bash
 uv run vich outline examples/docling_example.jsonl
@@ -107,11 +168,12 @@ uv run vich outline examples/docling_example.jsonl
 ```text
 - Docling: An Efficient Open-Source Toolkit for AI-driven Document Conversion
   - Abstract (1 chunk)
-  - Introduction (1 chunk)
-    - Features (1 chunk)
-  - State of the Art (2 chunks)
-  - Design and Architecture (2 chunks)
-    - Docling Document (2 chunks)
+  - 1 Introduction (2 chunks)
+  - 2 State of the Art (2 chunks)
+  - 3 Design and Architecture (1 chunk)
+    - 3.1 Docling Document (1 chunk)
+    - 3.2 Parser Backends (3 chunks)
+    - 3.3 Pipelines (1 chunk)
   ...
 ```
 
@@ -161,10 +223,21 @@ each one.
   a dropped fragment under ~15 significant words, or one an unrelated
   chunk happens to share a lot of vocabulary with, could still slip
   through.
+- **Stage 1 (outline extraction) can miss a real section.** Every chunk's
+  heading depends on it, so a section it misses either gets folded into an
+  adjacent one or gets an ad-hoc heading from stage 2's fallback — both
+  observed in testing (an unnumbered "Abstract" before "1 Introduction"
+  was initially missed and its content folded into "1 Introduction"
+  wholesale; the prompt now calls out unnumbered front-matter sections
+  explicitly, but stage 1 is still a single VLM call's judgment, not a
+  guarantee). Sanity-check the outline on a new document type with
+  `vich outline` before trusting the heading labels at scale.
 - **Chunk boundaries and `content_type` choices vary between runs** on the
   same PDF, since they're still an LLM's judgment call, not a deterministic
   rule. Re-running `vich parse` on the same file won't reproduce byte-for-byte
-  identical output.
+  identical output. (Heading *wording* is the exception — that's now
+  anchored to stage 1's outline and stays consistent within a run, and
+  usually across re-runs too since it's the same document structure.)
 
 ## Roadmap
 
@@ -174,6 +247,8 @@ each one.
 - [x] Document outline (`vich.outline`)
 - [x] Ground chunk_text in the PDF's extracted text (reduce paraphrasing)
 - [x] Detect and recover dropped content (`vich.chunking.recovery`)
+- [x] Two-stage pipeline: whole-document outline, then per-batch chunking
+      against it (`vich.chunking.outline_extraction`)
 - [ ] Pluggable VLM backend (OpenAI-compatible today; others later)
 - [ ] More reliable per-chunk page attribution
 - [ ] Publish to PyPI

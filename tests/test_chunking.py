@@ -81,14 +81,12 @@ def test_build_prompt_fills_placeholders_and_leaves_schema_braces_intact():
         page_end=4,
         previous_batch_summary="Intro section covered.",
         previous_last_chunk="",
-        previous_heading_hierarchy={"level_1": "Doc One"},
     )
 
     assert "doc_1" in prompt
     assert "Doc One" in prompt
     assert "1-4" in prompt
     assert "Intro section covered." in prompt
-    assert '"level_1": "Doc One"' in prompt
     # The JSON schema block's literal braces must survive templating.
     assert '"chunks": [' in prompt
 
@@ -101,7 +99,6 @@ def test_build_prompt_includes_extracted_page_text_when_given():
         page_end=1,
         previous_batch_summary="",
         previous_last_chunk="",
-        previous_heading_hierarchy={},
         extracted_page_text="--- page 1 ---\nApplicants must be 19 or older.",
     )
 
@@ -116,7 +113,34 @@ def test_build_prompt_notes_missing_text_layer_when_not_given():
         page_end=1,
         previous_batch_summary="",
         previous_last_chunk="",
-        previous_heading_hierarchy={},
     )
 
     assert "no text layer" in prompt
+
+
+def test_build_prompt_includes_known_outline_when_given():
+    prompt = build_prompt(
+        document_id="doc_1",
+        source="Doc One",
+        page_start=1,
+        page_end=1,
+        previous_batch_summary="",
+        previous_last_chunk="",
+        known_outline="- Doc One\n  - Introduction\n  - Results",
+    )
+
+    assert "- Introduction" in prompt
+    assert "- Results" in prompt
+
+
+def test_build_prompt_notes_missing_outline_when_not_given():
+    prompt = build_prompt(
+        document_id="doc_1",
+        source="Doc One",
+        page_start=1,
+        page_end=1,
+        previous_batch_summary="",
+        previous_last_chunk="",
+    )
+
+    assert "none established" in prompt

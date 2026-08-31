@@ -53,8 +53,8 @@ def call_vlm_chunker(
     page_images: list[PageImage],
     previous_batch_summary: str,
     previous_last_chunk: str,
-    previous_heading_hierarchy: dict[str, Any],
     extracted_page_text: str = "",
+    known_outline: str = "",
     prompt_template: str = PROMPT_TEMPLATE,
     max_output_tokens: int = 8000,
     temperature: float = 0.1,
@@ -66,6 +66,12 @@ def call_vlm_chunker(
     re-transcribe it from the image, which drifts into paraphrasing on
     dense text; pass "" for scanned/image-only PDFs with no text layer.
 
+    `known_outline` (see `vich.chunking.outline_extraction`) grounds each
+    chunk's heading labels in the document's already-established structure
+    instead of letting the model reinvent hierarchy per batch, which is
+    what let the same section come back worded differently across
+    batches; pass "" to fall back to the old invent-as-you-go behavior.
+
     Returns the raw parsed JSON (matching the schema in `prompt.py`);
     callers normalize individual chunks via `chunking.normalize`.
     """
@@ -76,8 +82,8 @@ def call_vlm_chunker(
         page_end=page_end,
         previous_batch_summary=previous_batch_summary,
         previous_last_chunk=previous_last_chunk,
-        previous_heading_hierarchy=previous_heading_hierarchy,
         extracted_page_text=extracted_page_text,
+        known_outline=known_outline,
         template=prompt_template,
     )
 
