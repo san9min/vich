@@ -1,7 +1,9 @@
 """Generate examples/chunk_visualization.html from
 examples/docling_example.{pdf,jsonl}: a self-contained page showing each
-source page with its chunks boxed directly on the page image, plus a card
-per chunk with its full text/table and metadata.
+source page with its chunks boxed directly on the page image, a cropped
+image thumbnail of what each box covers, a card per chunk with its full
+text/table and metadata, and a document-wide heading outline (via
+vich.outline) linking down to each chunk.
 
 vich's chunks don't carry bounding boxes (the VLM reasons over the whole
 page image, not coordinates), so the box(es) for each chunk are *estimated*
@@ -11,10 +13,15 @@ regions: a new region starts wherever the matched reading position jumps
 back up the page (a two-column wrap) or skips a large vertical gap (likely
 unrelated content in between). A chunk spanning a column break correctly
 gets two boxes instead of one giant box swallowing the gutter between them.
+`figure` chunks are a special case: a figure itself has no extractable
+text, so only its caption matches -- the region is nudged upward to the
+nearest preceding text block so the box/crop actually includes the figure,
+not just its caption line.
+
 This only works for text-based PDFs, some chunks (especially short,
 heavily-paraphrased ones) won't get a confident match at all, and it's
 purely a docs/demo convenience -- it is not part of the vich package or its
-output schema.
+output schema. (The outline *is* part of vich -- see vich.outline.)
 
 Re-run after regenerating the example PDF or re-running `vich parse`:
 
@@ -33,6 +40,9 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 from PIL import Image, ImageDraw, ImageFont
+
+from vich.outline import OutlineNode, build_outline
+from vich.schema import Chunk
 
 EXAMPLES_DIR = Path(__file__).parent
 PDF_PATH = EXAMPLES_DIR / "docling_example.pdf"
@@ -64,8 +74,8 @@ def load_chunks(jsonl_path: Path) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Chunk text -> approximate bounding box, by matching against the PDF's own
-# text layer (word-for-word, tolerant of small VLM rewording / skips).
+# Chunk text -> approximate bounding box(es), by matching against the PDF's
+# own text layer (word-for-word, tolerant of rewording / skips).
 # ---------------------------------------------------------------------------
 
 
@@ -165,6 +175,35 @@ def _split_into_regions(rects: list[Rect], gap_tol: float = 40, line_tol: float 
     return regions
 
 
+def _extend_figure_region_upward(page: fitz.Page, rect: fitz.Rect, max_extend: float = 260) -> fitz.Rect:
+    """A figure itself has no extractable text -- only its caption matches
+    -- so nudge the region's top edge up to just below the nearest real
+    preceding paragraph in the same column, capturing the figure above the
+    caption instead of just the caption line(s).
+
+    "Nearest preceding text block" alone isn't enough: a diagram's own
+    internal labels (e.g. "PDF", "OCR", "docx") are text blocks too, and
+    without filtering them out the extension stops at the diagram's own
+    last label instead of reaching above the diagram. Requiring at least a
+    handful of words excludes short labels while still matching real
+    prose.
+    """
+    blocks = page.get_text("blocks")  # x0, y0, x1, y1, text, block_no, block_type
+    preceding_prose = [
+        b
+        for b in blocks
+        if b[3] <= rect.y0 + 2
+        and min(b[2], rect.x1) > max(b[0], rect.x0)
+        and len(b[4].split()) >= 8
+    ]
+    if preceding_prose:
+        new_top = max(b[3] for b in preceding_prose) + 4
+    else:
+        new_top = rect.y0 - max_extend
+    new_top = max(new_top, rect.y0 - max_extend, 0)
+    return fitz.Rect(rect.x0, new_top, rect.x1, rect.y1)
+
+
 def estimate_chunk_regions(page: fitz.Page, chunk: dict, min_region_size: int = 3) -> list[fitz.Rect]:
     """Best-effort bounding rect(s) for where `chunk` lives on `page`. May
     return zero (no confident match), one, or several rects (e.g. a
@@ -182,19 +221,35 @@ def estimate_chunk_regions(page: fitz.Page, chunk: dict, min_region_size: int = 
         x1 = max(r[2] for r in region)
         y1 = max(r[3] for r in region)
         boxes.append(fitz.Rect(x0, y0, x1, y1))
+
+    if chunk.get("content_type") == "figure" and boxes:
+        boxes[0] = _extend_figure_region_upward(page, boxes[0])
+
     return boxes
 
 
 # ---------------------------------------------------------------------------
-# Rendering: page image with chunk boxes drawn on top.
+# Rendering: page image, chunk boxes drawn on top, and per-chunk crops.
 # ---------------------------------------------------------------------------
 
 
-def render_boxed_page(page: fitz.Page, page_chunks: list[tuple[int, dict]], zoom: float = ZOOM) -> Image.Image:
-    """`page_chunks` is [(global_chunk_number, chunk), ...] for this page."""
+def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    hex_color = hex_color.lstrip("#")
+    return tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+
+
+def render_page_base(page: fitz.Page, zoom: float = ZOOM) -> Image.Image:
     pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-    base = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGBA")
-    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    return Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGBA")
+
+
+def compose_boxed_image(
+    base_image: Image.Image,
+    page_chunks: list[tuple[int, dict]],
+    chunk_regions: dict[int, list[fitz.Rect]],
+    zoom: float = ZOOM,
+) -> Image.Image:
+    overlay = Image.new("RGBA", base_image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
     try:
@@ -203,10 +258,9 @@ def render_boxed_page(page: fitz.Page, page_chunks: list[tuple[int, dict]], zoom
         font = ImageFont.load_default()
 
     for number, chunk in page_chunks:
-        regions = estimate_chunk_regions(page, chunk)
         color = CONTENT_TYPE_COLORS.get(chunk.get("content_type") or "mixed", "#666666")
 
-        for region_idx, rect in enumerate(regions):
+        for region_idx, rect in enumerate(chunk_regions.get(number, [])):
             box = (rect.x0 * zoom, rect.y0 * zoom, rect.x1 * zoom, rect.y1 * zoom)
             pad = 4
             box = (box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad)
@@ -225,12 +279,17 @@ def render_boxed_page(page: fitz.Page, page_chunks: list[tuple[int, dict]], zoom
             tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
             draw.text((cx - tw / 2, cy - th / 2 - bbox[1]), label, fill="white", font=font)
 
-    return Image.alpha_composite(base, overlay)
+    return Image.alpha_composite(base_image, overlay)
 
 
-def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
-    hex_color = hex_color.lstrip("#")
-    return tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+def crop_region(base_image: Image.Image, rect: fitz.Rect, zoom: float = ZOOM, pad: int = 4) -> Image.Image:
+    box = (
+        max(rect.x0 * zoom - pad, 0),
+        max(rect.y0 * zoom - pad, 0),
+        min(rect.x1 * zoom + pad, base_image.width),
+        min(rect.y1 * zoom + pad, base_image.height),
+    )
+    return base_image.crop(tuple(round(v) for v in box))
 
 
 def image_to_base64_png(image: Image.Image) -> str:
@@ -268,7 +327,7 @@ def heading_breadcrumb(chunk: dict) -> str:
     return " &rsaquo; ".join(html.escape(p) for p in parts)
 
 
-def chunk_card_html(number: int, chunk: dict) -> str:
+def chunk_card_html(number: int, chunk: dict, thumbnails: list[Image.Image]) -> str:
     content_type = chunk.get("content_type") or "mixed"
     color = CONTENT_TYPE_COLORS.get(content_type, "#666666")
     body = (
@@ -278,40 +337,81 @@ def chunk_card_html(number: int, chunk: dict) -> str:
     )
     keywords = ", ".join(chunk.get("keywords") or [])
     keywords_html = f'<div class="keywords">keywords: {html.escape(keywords)}</div>' if keywords else ""
+    thumbs_html = "".join(
+        f'<img class="thumb" src="data:image/png;base64,{image_to_base64_png(t)}" alt="Cropped source region for {html.escape(chunk["chunk_id"])}" />'
+        for t in thumbnails
+    )
+    thumbs_block = f'<div class="thumbs">{thumbs_html}</div>' if thumbs_html else ""
 
     return f"""
-    <div class="chunk-card" style="--accent: {color}">
+    <div class="chunk-card" id="chunk-{number}" style="--accent: {color}">
       <div class="chunk-head">
         <span class="number-badge" style="background:{color}">{number}</span>
         <span class="badge" style="background:{color}">{html.escape(content_type)}</span>
         <code class="chunk-id">{html.escape(chunk['chunk_id'])}</code>
       </div>
       <div class="breadcrumb">{heading_breadcrumb(chunk)}</div>
+      {thumbs_block}
       <div class="chunk-body">{body}</div>
       {keywords_html}
     </div>
     """
 
 
+def outline_html(nodes: list[OutlineNode], chunk_numbers: dict[str, int]) -> str:
+    items = []
+    for node in nodes:
+        own_links = "".join(
+            f'<a class="outline-chunk-link" href="#chunk-{chunk_numbers[cid]}">{chunk_numbers[cid]}</a>'
+            for cid in node.chunk_ids
+            if cid in chunk_numbers
+        )
+        children_html = outline_html(node.children, chunk_numbers) if node.children else ""
+        items.append(
+            f'<li class="outline-l{node.level}">'
+            f'<span class="outline-title">{html.escape(node.title)}</span>'
+            f'{own_links}'
+            f"{children_html}"
+            "</li>"
+        )
+    return f"<ul>{''.join(items)}</ul>"
+
+
 def build() -> None:
     doc = fitz.open(PDF_PATH)
-    chunks = load_chunks(JSONL_PATH)
-    numbered_chunks = list(enumerate(chunks, start=1))
+    raw_chunks = load_chunks(JSONL_PATH)
+    numbered_chunks = list(enumerate(raw_chunks, start=1))
+    chunk_numbers = {c["chunk_id"]: n for n, c in numbered_chunks}
+
+    outline_nodes = build_outline(Chunk.model_validate(c) for c in raw_chunks)
 
     pages_html = []
     try:
         for page_index in range(doc.page_count):
             page_num = page_index + 1
             page = doc.load_page(page_index)
-            page_chunks = [(n, c) for n, c in numbered_chunks if c["page_start"] <= page_num <= c["page_end"]]
+            page_chunks = [
+                (n, c) for n, c in numbered_chunks if c["page_start"] <= page_num <= c["page_end"]
+            ]
 
-            boxed_image = render_boxed_page(page, page_chunks)
+            base_image = render_page_base(page)
+            chunk_regions = {n: estimate_chunk_regions(page, c) for n, c in page_chunks}
+
+            boxed_image = compose_boxed_image(base_image, page_chunks, chunk_regions)
             image_b64 = image_to_base64_png(boxed_image)
 
             ASSETS_DIR.mkdir(exist_ok=True)
             boxed_image.convert("RGB").save(ASSETS_DIR / f"{ASSET_PREFIX}_{page_num}.png")
 
-            cards = "\n".join(chunk_card_html(n, c) for n, c in page_chunks) or "<p class='empty'>No chunks.</p>"
+            cards = (
+                "\n".join(
+                    chunk_card_html(
+                        n, c, [crop_region(base_image, rect) for rect in chunk_regions.get(n, [])]
+                    )
+                    for n, c in page_chunks
+                )
+                or "<p class='empty'>No chunks.</p>"
+            )
             pages_html.append(
                 f"""
             <section class="page-row">
@@ -338,10 +438,10 @@ def build() -> None:
 <title>ViCH chunk visualization</title>
 <style>
   :root {{
-    --bg: #ffffff; --fg: #1a1d24; --muted: #6b7280; --border: #e2e5ea; --card-bg: #fafbfc;
+    --bg: #ffffff; --fg: #1a1d24; --muted: #6b7280; --border: #e2e5ea; --card-bg: #fafbfc; --accent-soft: #eef1f8;
   }}
   @media (prefers-color-scheme: dark) {{
-    :root {{ --bg: #14161a; --fg: #e7e9ee; --muted: #9aa1ad; --border: #2a2e37; --card-bg: #1b1e24; }}
+    :root {{ --bg: #14161a; --fg: #e7e9ee; --muted: #9aa1ad; --border: #2a2e37; --card-bg: #1b1e24; --accent-soft: #1c2333; }}
   }}
   * {{ box-sizing: border-box; }}
   body {{
@@ -349,22 +449,43 @@ def build() -> None:
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }}
   h1 {{ font-size: 1.4rem; margin-bottom: 4px; }}
+  h2 {{ font-size: 1.05rem; margin: 0 0 10px; }}
   .subtitle {{ color: var(--muted); margin-top: 0; margin-bottom: 6px; font-size: 0.95rem; }}
   .caveat {{ color: var(--muted); margin-top: 0; margin-bottom: 20px; font-size: 0.8rem; }}
   .legend {{ display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 28px; font-size: 0.85rem; color: var(--muted); }}
   .legend-item {{ display: inline-flex; align-items: center; gap: 6px; }}
   .dot {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; }}
+
+  .outline {{ border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; margin-bottom: 32px; background: var(--card-bg); }}
+  .outline ul {{ list-style: none; margin: 0; padding-left: 18px; }}
+  .outline > ul {{ padding-left: 0; }}
+  .outline li {{ margin: 3px 0; }}
+  .outline-title {{ font-size: 0.9rem; }}
+  .outline-l1 > .outline-title {{ font-weight: 700; font-size: 1rem; }}
+  .outline-l2 > .outline-title {{ font-weight: 600; color: var(--fg); }}
+  .outline-l3 > .outline-title {{ color: var(--muted); }}
+  .outline-chunk-link {{
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; margin-left: 6px; border-radius: 50%;
+    background: var(--accent-soft); color: var(--fg); font-size: 0.68rem; font-weight: 600;
+    text-decoration: none; vertical-align: middle;
+  }}
+  .outline-chunk-link:hover {{ outline: 1px solid var(--muted); }}
+
   .page-row {{ display: grid; grid-template-columns: minmax(280px, 460px) 1fr; gap: 24px; margin-bottom: 40px; align-items: start; }}
   .page-image {{ position: sticky; top: 16px; }}
   .page-image img {{ width: 100%; border: 1px solid var(--border); border-radius: 6px; display: block; }}
   .page-label {{ text-align: center; color: var(--muted); font-size: 0.8rem; margin-top: 6px; }}
   .page-chunks {{ display: flex; flex-direction: column; gap: 14px; min-width: 0; }}
-  .chunk-card {{ border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 6px; padding: 12px 14px; background: var(--card-bg); }}
+  .chunk-card {{ border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 6px; padding: 12px 14px; background: var(--card-bg); scroll-margin-top: 16px; }}
+  .chunk-card:target {{ outline: 2px solid var(--accent); }}
   .chunk-head {{ display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }}
   .number-badge {{ color: white; font-size: 0.72rem; font-weight: 700; width: 20px; height: 20px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }}
   .badge {{ color: white; font-size: 0.72rem; font-weight: 600; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.02em; }}
   .chunk-id {{ font-size: 0.75rem; color: var(--muted); }}
   .breadcrumb {{ font-size: 0.8rem; color: var(--muted); margin-bottom: 8px; }}
+  .thumbs {{ display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }}
+  .thumbs .thumb {{ max-width: 100%; max-height: 160px; border: 1px solid var(--border); border-radius: 4px; display: block; }}
   .chunk-body p {{ margin: 0; line-height: 1.5; font-size: 0.92rem; white-space: pre-wrap; }}
   .keywords {{ margin-top: 8px; font-size: 0.78rem; color: var(--muted); }}
   table.chunk-table {{ border-collapse: collapse; width: 100%; font-size: 0.85rem; }}
@@ -379,16 +500,20 @@ def build() -> None:
 </head>
 <body>
   <h1>ViCH chunk visualization</h1>
-  <p class="subtitle">examples/docling_example.pdf &rarr; {len(chunks)} chunks. Numbered boxes on the page match the numbered cards on the right.</p>
-  <p class="caveat">Boxes are estimated by matching each chunk's text back onto the PDF's text layer (vich's chunk schema has no bounding boxes) &mdash; a docs-only convenience, not part of vich's output. Some chunks don't get a confident enough match to draw.</p>
+  <p class="subtitle">examples/docling_example.pdf &rarr; {len(raw_chunks)} chunks. Numbered boxes on the page match the numbered cards on the right.</p>
+  <p class="caveat">Boxes/crops are estimated by matching each chunk's text back onto the PDF's text layer (vich's chunk schema has no bounding boxes) &mdash; a docs-only convenience, not part of vich's output. Some chunks don't get a confident enough match to draw. The outline below, though, <em>is</em> a real vich feature (see <code>vich.outline</code>).</p>
   <div class="legend">{legend}</div>
+  <div class="outline">
+    <h2>Document outline</h2>
+    {outline_html(outline_nodes, chunk_numbers)}
+  </div>
   {''.join(pages_html)}
 </body>
 </html>
 """
 
     OUTPUT_PATH.write_text(html_doc, encoding="utf-8")
-    print(f"Wrote {OUTPUT_PATH} ({len(chunks)} chunks across {len(pages_html)} pages)")
+    print(f"Wrote {OUTPUT_PATH} ({len(raw_chunks)} chunks across {len(pages_html)} pages)")
 
 
 if __name__ == "__main__":

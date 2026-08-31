@@ -12,7 +12,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from vich.outline import build_outline, render_outline_markdown
 from vich.pipeline import DEFAULT_OUTPUT_DIR, process_documents, process_pdf
+from vich.schema import load_chunks
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -52,6 +54,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Reprocess and overwrite an existing output JSONL.",
     )
 
+    outline_cmd = subparsers.add_parser(
+        "outline", help="Print the heading tree assembled from a `vich parse` JSONL file."
+    )
+    outline_cmd.add_argument("jsonl_path", type=Path, help="A JSONL file produced by `vich parse`.")
+
     return parser
 
 
@@ -82,6 +89,10 @@ def main(argv: list[str] | None = None) -> None:
             )
         else:
             raise SystemExit(f"Not a file or directory: {args.path}")
+
+    elif args.command == "outline":
+        chunks = load_chunks(args.jsonl_path)
+        print(render_outline_markdown(build_outline(chunks)))
 
 
 if __name__ == "__main__":

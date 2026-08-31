@@ -6,6 +6,7 @@ mafio/data/preprocess.py into pydantic models.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -63,6 +64,12 @@ class Chunk(BaseModel):
 
     def to_jsonl_line(self) -> str:
         return self.model_dump_json(exclude_none=False)
+
+
+def load_chunks(jsonl_path: Path) -> list[Chunk]:
+    """Read a `vich parse` output file back into `Chunk` objects."""
+    with jsonl_path.open(encoding="utf-8") as handle:
+        return [Chunk.model_validate_json(line) for line in handle if line.strip()]
 
 
 class BatchResult(BaseModel):

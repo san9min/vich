@@ -24,7 +24,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+# pillow is only used by examples/generate_chunk_visualization.py, not the vich package itself.
+dev = ["pytest>=8.0", "ruff>=0.6", "pillow>=10.0"]
 
 [project.urls]
 Repository = "https://github.com/san9min/vich"
@@ -40,7 +41,7 @@ build-backend = "hatchling.build"
 packages = ["src/vich"]
 
 [tool.uv]
-dev-dependencies = ["pytest>=8.0", "ruff>=0.6"]
+dev-dependencies = ["pytest>=8.0", "ruff>=0.6", "pillow>=10.0"]
 
 [tool.ruff]
 line-length = 100

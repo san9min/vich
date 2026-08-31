@@ -22,6 +22,10 @@ directly from the page, preserving:
 - Table structure as markdown, not flattened text
 - Keywords/entities per chunk for hybrid (sparse + dense) retrieval
 
+Each chunk's heading labels are flat (`level_1/2/3_heading` strings); `vich`
+separately assembles them into a document-wide heading tree — see
+[Outline](#outline) below.
+
 ## Project structure
 
 ```text
@@ -30,6 +34,7 @@ vich/
 │   ├── parsing/         # PDF -> page images (PyMuPDF-based rendering)
 │   ├── chunking/        # VLM prompt + chunk extraction/normalization
 │   ├── schema.py        # Chunk / output data models (pydantic)
+│   ├── outline.py        # Assemble chunks' flat headings into a tree
 │   ├── pipeline.py       # Batch PDF -> JSONL orchestration
 │   └── cli.py            # `vich` command-line entrypoint
 ├── tests/
@@ -72,12 +77,37 @@ Each chunk (see `vich.schema.Chunk`) carries a 3-level heading hierarchy,
 page range, content type, table markdown (when applicable), keywords,
 entities, and a precomposed `embedding_text` ready for a vector store.
 
+## Outline
+
+`vich parse` gives every chunk a flat heading label; `vich.outline` builds
+the document-wide tree from those labels as a separate, free (no VLM call)
+step over already-produced chunks:
+
+```bash
+uv run vich outline examples/docling_example.jsonl
+```
+
+```text
+- Docling: An Efficient Open-Source Toolkit for AI-driven Document Conversion
+  - Introduction
+    - Overview and Features (1 chunk)
+  - Design and Architecture
+    - Docling Document (1 chunk)
+    - Parser Backends (1 chunk)
+    ...
+```
+
+Or as a library: `vich.build_outline(chunks)` returns a tree of
+`OutlineNode` (`title`, `level`, `children`, `chunk_ids`); `render_outline_markdown(...)`
+renders it as above.
+
 ## Example
 
-See [`examples/`](examples/) for a worked example: a fictional 2-page PDF,
-the actual JSONL chunks vich produces from it, and a
+See [`examples/`](examples/) for a worked example: a real academic PDF, the
+actual JSONL chunks vich produces from it, and a
 [chunk visualization page](examples/chunk_visualization.html) showing each
-source page with a box drawn around every chunk extracted from it.
+source page with a box (and cropped image) for every chunk extracted from
+it, plus the document outline linking down to each one.
 
 ## Roadmap
 

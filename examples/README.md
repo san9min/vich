@@ -20,8 +20,9 @@ figures, and a real benchmark table.
   `vich parse examples/docling_example.pdf`, using `gpt-4.1-mini`
   (16 chunks from 8 pages)
 - [`chunk_visualization.html`](chunk_visualization.html) — open this in a
-  browser to see each source page **with a numbered box around every
-  chunk vich found on it**, next to a card per chunk (see screenshot below)
+  browser: a document outline linking to every chunk, and each source page
+  **with a numbered box + cropped image for every chunk vich found on it**,
+  next to a card per chunk (see screenshots below)
 - `generate_chunk_visualization.py` — the script that produced the
   visualization + `assets/`, kept so the example can be regenerated
 
@@ -29,7 +30,6 @@ figures, and a real benchmark table.
 
 ```bash
 uv sync --extra dev
-pip install pillow  # docs-only, not a project dependency
 
 curl -sL "https://arxiv.org/pdf/2501.17887v1" -o examples/docling_example.pdf
 uv run vich parse examples/docling_example.pdf --output-dir examples --overwrite
@@ -37,23 +37,58 @@ python examples/generate_chunk_visualization.py
 open examples/chunk_visualization.html
 ```
 
+## Document outline
+
+`vich.outline` (a real library feature, not a docs-only script — see the
+[root README](../README.md#outline)) assembles all 16 chunks' flat
+`level_1/2/3_heading` labels into a tree:
+
+```bash
+uv run vich outline examples/docling_example.jsonl
+```
+
+```text
+- Docling: An Efficient Open-Source Toolkit for AI-driven Document Conversion
+  - Introduction
+    - Overview and Features (1 chunk)
+  - Design and Architecture
+    - Docling Document (1 chunk)
+    - Parser Backends (1 chunk)
+    - Pipelines (1 chunk)
+    - Docling Pipelines and Usage Model (1 chunk)
+  - Performance
+    - Benchmark Dataset (1 chunk)
+    - System Configurations (1 chunk)
+  ...
+```
+
+The visualization's "Document outline" section renders the same tree, with
+each heading linking down to its chunk's card.
+
 ## What the visualization shows
 
 Each source page is rendered on the left with a numbered, color-coded box
 around every chunk found on it; the matching numbered card on the right
-shows that chunk's 3-level heading breadcrumb, body (or table, rendered
-from `table_markdown`), and extracted keywords.
+shows a cropped thumbnail of that same region, the chunk's 3-level heading
+breadcrumb, body (or table, rendered from `table_markdown`), and extracted
+keywords.
 
 > **Note:** `vich`'s chunk schema has no bounding-box field — the VLM
 > reasons over the whole page image and returns text, not coordinates. The
-> boxes here are a docs-only convenience: `generate_chunk_visualization.py`
+> boxes/crops here are a docs-only convenience: `generate_chunk_visualization.py`
 > estimates each one by matching the chunk's own text back onto the PDF's
-> text layer, splitting into separate boxes wherever the match crosses a
+> text layer, splitting into separate regions wherever the match crosses a
 > column break or a large gap. That only works for text-based PDFs, some
 > heavily-paraphrased chunks won't get a confident enough match to draw at
-> all, and it's not part of what `vich parse` outputs.
+> all, and it's not part of what `vich parse` outputs. (The outline above
+> *is* part of vich's actual output, not a docs convenience.)
 
-![Chunk visualization: page 2 of the Docling paper, with numbered boxes around a figure caption and a paragraph chunk](assets/docling_page_2.png)
+![Chunk visualization: page 2 of the Docling paper, with a box around the entire figure (not just its caption) and around a paragraph chunk](assets/docling_page_2.png)
+
+A figure's own graphic has no extractable text — only its caption does — so
+a caption-only match would just box the caption line. The script instead
+extends a `figure` chunk's box upward to the nearest real preceding
+paragraph, landing on the whole figure as shown above (chunk 9).
 
 For example, "Table 1" becomes a single `table` chunk that keeps its column
 headers instead of being flattened into unreadable text:
@@ -67,5 +102,5 @@ headers instead of being flattened into unreadable text:
 | Unstructured | 0.16.5  |             | hi_res with table structure          |
 ```
 
-...and a figure caption on page 2 becomes its own `figure` chunk with a
-heading breadcrumb, rather than being merged into the surrounding text.
+...and that figure caption becomes its own `figure` chunk with a heading
+breadcrumb, rather than being merged into the surrounding text.
