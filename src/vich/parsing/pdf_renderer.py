@@ -101,3 +101,33 @@ def extract_page_text(pdf_path: Path, page_start: int, page_end: int) -> str:
         return "\n\n".join(parts)
     finally:
         doc.close()
+
+
+class PageBlock(TypedDict):
+    """One paragraph-ish text block from the PDF's own layout, in reading
+    order. Used to detect and recover content the VLM's chunks failed to
+    cover -- see `vich.chunking.recovery`."""
+
+    page_num: int
+    text: str
+
+
+def extract_page_blocks(pdf_path: Path, page_start: int, page_end: int) -> list[PageBlock]:
+    """Return every text block in a 1-based, inclusive page range, in
+    reading order, one per paragraph-ish unit (PyMuPDF's own block
+    segmentation -- not as semantically aware as a VLM's chunking, but
+    exact and deterministic, which is what content-recovery needs).
+    """
+    doc = fitz.open(pdf_path)
+    try:
+        blocks: list[PageBlock] = []
+        for page_num in range(page_start, page_end + 1):
+            page_blocks = doc.load_page(page_num - 1).get_text("blocks")
+            page_blocks.sort(key=lambda b: b[5])  # block_no: extraction/reading order
+            for raw_block in page_blocks:
+                text = raw_block[4].strip()
+                if text:
+                    blocks.append(PageBlock(page_num=page_num, text=text))
+        return blocks
+    finally:
+        doc.close()

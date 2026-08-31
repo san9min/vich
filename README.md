@@ -14,7 +14,7 @@ Fixed-length or heading-regex text splitters break down on real-world
 structured PDFs — tables, boxed notes, footnotes, multi-column layouts, and
 section hierarchies that are only legible from the page's visual layout.
 ViCH instead renders each page as an image and asks a VLM to produce
-**layout-aware semantic chunks** (paragraphs, tables, lists, boxed sections)
+**layout-aware semantic chunks** (paragraphs, tables, boxed sections, figures)
 directly from the page, preserving:
 
 - A 3-level heading hierarchy (`level_1` / `level_2` / `level_3`) per chunk
@@ -34,10 +34,14 @@ paraphrasing (an LLM "reading" an image tends to summarize, not
 transcribe); see [`examples/README.md`](examples/README.md) for a
 before/after. That fix has its own failure mode, though: a longer prompt
 (more images and more extracted text per call) makes it more likely the
-model drops a paragraph outright instead of merely paraphrasing it, so
-`batch_size` defaults small (2 pages) and `vich.chunking.coverage` checks
-each batch's chunks against the text it was given, warning when a batch
-looks like it lost content.
+model drops a paragraph outright instead of merely paraphrasing it —
+observed in practice on the example paper, from a batch whose *overall*
+word coverage still looked fine. A warning alone doesn't fix a dropped
+paragraph, so `vich.chunking.recovery` checks coverage per paragraph-ish
+block instead (PyMuPDF's own layout segmentation) and inserts a fallback
+chunk built from any block's verbatim text that the VLM's own chunks don't
+cover — see [`examples/README.md`](examples/README.md) for this caught
+live on a real run.
 
 ## Project structure
 
@@ -106,7 +110,7 @@ uv run vich outline examples/docling_example.jsonl
   - Introduction (1 chunk)
     - Features (1 chunk)
   - State of the Art (2 chunks)
-  - Design and Architecture (1 chunk)
+  - Design and Architecture (2 chunks)
     - Docling Document (2 chunks)
   ...
 ```
@@ -114,6 +118,20 @@ uv run vich outline examples/docling_example.jsonl
 Or as a library: `vich.build_outline(chunks)` returns a tree of
 `OutlineNode` (`title`, `level`, `children`, `chunk_ids`); `render_outline_markdown(...)`
 renders it as above.
+
+## Content recovery
+
+`process_pdf` automatically checks each batch's chunks against
+`vich.parsing.extract_page_blocks` (the PDF's own paragraph-ish text
+blocks) and inserts a fallback chunk for any block that's substantial
+(15+ significant words) and barely covered (<30% word overlap) by what
+the VLM actually produced — `content_type: "paragraph"`,
+`source_notes` marked `"Auto-recovered: ..."`, heading labels inherited
+from the chunk right before it. This runs on every `vich parse` call, no
+flag needed, and prints `Recovered N block(s) ...` when it fires. It's
+mechanical, not semantic — a recovered chunk is exact source text, not a
+VLM's curated chunk — but it means nothing substantial silently
+disappears just because the model's own chunking missed it.
 
 ## Example
 
@@ -134,11 +152,13 @@ it, plus the document outline linking down to each one.
   extracted text fixed *wording* fidelity; it doesn't fix page attribution,
   which is a separate self-reported field.)
 - **The model can drop a paragraph outright, not just paraphrase it** —
-  observed on the example paper before `batch_size` was reduced (see
-  [`examples/README.md`](examples/README.md)). `vich.chunking.coverage`
-  warns when a batch's chunks look like they under-cover the text it was
-  given, but there's no way to force an LLM not to do this in the first
-  place; a warning is visibility, not a guarantee of complete coverage.
+  there's no way to force an LLM not to do this. `vich.chunking.recovery`
+  (see [Content recovery](#content-recovery)) catches and repairs this at
+  the paragraph level rather than just warning about it, but it's a
+  mechanical safety net, not a guarantee stronger than its own thresholds —
+  a dropped fragment under ~15 significant words, or one an unrelated
+  chunk happens to share a lot of vocabulary with, could still slip
+  through.
 - **Chunk boundaries and `content_type` choices vary between runs** on the
   same PDF, since they're still an LLM's judgment call, not a deterministic
   rule. Re-running `vich parse` on the same file won't reproduce byte-for-byte
@@ -151,7 +171,7 @@ it, plus the document outline linking down to each one.
 - [x] Docs + example PDF walkthrough
 - [x] Document outline (`vich.outline`)
 - [x] Ground chunk_text in the PDF's extracted text (reduce paraphrasing)
-- [x] Batch-coverage warning for dropped content (`vich.chunking.coverage`)
+- [x] Detect and recover dropped content (`vich.chunking.recovery`)
 - [ ] Pluggable VLM backend (OpenAI-compatible today; others later)
 - [ ] More reliable per-chunk page attribution
 - [ ] Publish to PyPI

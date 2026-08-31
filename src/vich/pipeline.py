@@ -16,10 +16,11 @@ from openai import OpenAI
 from tqdm import tqdm
 
 from vich.chunking.client import call_vlm_chunker
-from vich.chunking.coverage import LOW_COVERAGE_WARNING_THRESHOLD, coverage_ratio
 from vich.chunking.normalize import IdResolver, default_id_resolver, normalize_chunk
+from vich.chunking.recovery import find_missed_blocks
 from vich.parsing.pdf_renderer import (
     count_pages,
+    extract_page_blocks,
     extract_page_text,
     render_pdf_pages_to_base64,
     safe_stem,
@@ -52,8 +53,8 @@ def process_pdf(
     prompt makes it more likely the model drops a paragraph outright
     instead of merely paraphrasing it -- observed in practice on a 4-page
     batch of a dense academic paper. Raise it for faster/cheaper runs on
-    sparser documents; a low-coverage warning (see `vich.chunking.coverage`)
-    will flag it if a batch that size starts dropping content.
+    sparser documents; any paragraph a batch that size still drops gets
+    caught and recovered regardless (see `vich.chunking.recovery`).
     """
     resolved_model = model or os.getenv("VICH_VLM_MODEL")
     if not resolved_model:
@@ -116,13 +117,40 @@ def process_pdf(
             all_chunks.append(chunk)
 
         batch_chunks = all_chunks[base_idx:]
-        ratio = coverage_ratio(
-            page_text, [c.chunk_text or "" for c in batch_chunks] + [c.table_markdown or "" for c in batch_chunks]
-        )
-        if ratio < LOW_COVERAGE_WARNING_THRESHOLD:
+        batch_chunk_texts = [c.chunk_text or "" for c in batch_chunks] + [
+            c.table_markdown or "" for c in batch_chunks
+        ]
+        page_blocks = extract_page_blocks(pdf_path=pdf_path, page_start=page_start, page_end=page_end)
+        missed_blocks = find_missed_blocks(page_blocks, batch_chunk_texts)
+
+        for missed in missed_blocks:
+            last_chunk = all_chunks[-1] if all_chunks else None
+            recovered = normalize_chunk(
+                raw_chunk={
+                    "chunk_text": missed["text"],
+                    "content_type": "paragraph",
+                    "continuation_status": "partial",
+                    "level_1_heading": last_chunk.level_1_heading if last_chunk else None,
+                    "level_2_heading": last_chunk.level_2_heading if last_chunk else None,
+                    "source_notes": (
+                        "Auto-recovered: present in the source but omitted from the "
+                        "VLM's own chunking output for this batch."
+                    ),
+                },
+                document_id=document_id,
+                source=source,
+                source_url=source_url,
+                page_start=missed["page_num"],
+                page_end=missed["page_num"],
+                idx=len(all_chunks),
+                id_resolver=id_resolver,
+            )
+            all_chunks.append(recovered)
+
+        if missed_blocks:
             print(
-                f"Warning: pages {page_start}-{page_end} of {source} may be missing content "
-                f"(only ~{ratio:.0%} of the extracted text's words showed up in this batch's chunks)"
+                f"Recovered {len(missed_blocks)} block(s) the VLM omitted from pages "
+                f"{page_start}-{page_end} of {source} (see source_notes)"
             )
 
         previous_batch_summary = batch_result.get("batch_summary") or previous_batch_summary

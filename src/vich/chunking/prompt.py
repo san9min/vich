@@ -97,7 +97,7 @@ Output JSON schema:
       "level_1_heading": string,
       "level_2_heading": string,
       "level_3_heading": string,
-      "content_type": "paragraph" | "table" | "boxed_section" | "list" | "footnote" | "figure" | "mixed",
+      "content_type": "paragraph" | "table" | "boxed_section" | "footnote" | "figure" | "mixed",
       "continuation_status": "new" | "continues" | "partial",
       "chunk_text": string,
       "table_markdown": string | null,

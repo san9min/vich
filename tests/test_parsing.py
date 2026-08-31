@@ -2,7 +2,7 @@ from pathlib import Path
 
 import fitz
 
-from vich.parsing.pdf_renderer import extract_page_text, safe_stem, slugify
+from vich.parsing.pdf_renderer import extract_page_blocks, extract_page_text, safe_stem, slugify
 
 
 def _make_pdf(tmp_path: Path, pages: list[str]) -> Path:
@@ -10,6 +10,20 @@ def _make_pdf(tmp_path: Path, pages: list[str]) -> Path:
     for text in pages:
         page = doc.new_page()
         page.insert_text((72, 72), text)
+    path = tmp_path / "doc.pdf"
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def _make_pdf_with_blocks(tmp_path: Path, page_blocks: list[list[str]]) -> Path:
+    """Each inner list is one page's separate text blocks, placed far
+    enough apart vertically that PyMuPDF segments them individually."""
+    doc = fitz.open()
+    for blocks in page_blocks:
+        page = doc.new_page()
+        for i, text in enumerate(blocks):
+            page.insert_text((72, 72 + i * 200), text)
     path = tmp_path / "doc.pdf"
     doc.save(path)
     doc.close()
@@ -53,3 +67,28 @@ def test_extract_page_text_empty_for_blank_pages(tmp_path):
     pdf_path = _make_pdf(tmp_path, [""])
 
     assert extract_page_text(pdf_path, page_start=1, page_end=1) == ""
+
+
+def test_extract_page_blocks_splits_separate_blocks_in_reading_order(tmp_path):
+    pdf_path = _make_pdf_with_blocks(tmp_path, [["First block.", "Second block."]])
+
+    blocks = extract_page_blocks(pdf_path, page_start=1, page_end=1)
+
+    texts = [b["text"] for b in blocks]
+    assert texts.index("First block.") < texts.index("Second block.")
+    assert all(b["page_num"] == 1 for b in blocks)
+
+
+def test_extract_page_blocks_respects_page_range(tmp_path):
+    pdf_path = _make_pdf_with_blocks(tmp_path, [["Page one."], ["Page two."], ["Page three."]])
+
+    blocks = extract_page_blocks(pdf_path, page_start=2, page_end=2)
+
+    assert [b["text"] for b in blocks] == ["Page two."]
+    assert blocks[0]["page_num"] == 2
+
+
+def test_extract_page_blocks_empty_for_blank_pages(tmp_path):
+    pdf_path = _make_pdf(tmp_path, [""])
+
+    assert extract_page_blocks(pdf_path, page_start=1, page_end=1) == []

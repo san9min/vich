@@ -14,6 +14,7 @@ def test_process_pdf_assigns_dense_sequential_chunk_ids(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "count_pages", lambda pdf_path: 8)
     monkeypatch.setattr(pipeline, "render_pdf_pages_to_base64", lambda **kwargs: [])
     monkeypatch.setattr(pipeline, "extract_page_text", lambda **kwargs: "")
+    monkeypatch.setattr(pipeline, "extract_page_blocks", lambda **kwargs: [])
 
     # Two batches (batch_size=4, 8 pages) with 3 and 2 chunks respectively.
     batch_results = iter(
@@ -44,6 +45,7 @@ def test_process_pdf_passes_extracted_page_text_to_the_vlm_call(tmp_path, monkey
     monkeypatch.setattr(
         pipeline, "extract_page_text", lambda **kwargs: "--- page 1 ---\nVerbatim source text."
     )
+    monkeypatch.setattr(pipeline, "extract_page_blocks", lambda **kwargs: [])
 
     seen_texts = []
 
@@ -63,44 +65,71 @@ def test_process_pdf_passes_extracted_page_text_to_the_vlm_call(tmp_path, monkey
     assert seen_texts == ["--- page 1 ---\nVerbatim source text."]
 
 
-def test_process_pdf_warns_when_a_batch_drops_content(tmp_path, monkeypatch, capsys):
+def test_process_pdf_recovers_a_block_the_vlm_dropped(tmp_path, monkeypatch, capsys):
     """The VLM can simply omit a paragraph from its output rather than
     paraphrasing it (this is what actually happened on the example PDF: an
-    entire introduction section vanished from one run). There's no way to
-    force it not to, so a batch with low word-overlap against the extracted
-    text should at least print a warning instead of failing silently."""
+    entire introduction section vanished from one run, from a batch whose
+    *overall* word coverage still looked fine). There's no way to force an
+    LLM not to do this, so a dropped-but-substantial block should end up in
+    the output anyway, as its own recovered chunk."""
     monkeypatch.setattr(pipeline, "count_pages", lambda pdf_path: 1)
     monkeypatch.setattr(pipeline, "render_pdf_pages_to_base64", lambda **kwargs: [])
+    monkeypatch.setattr(pipeline, "extract_page_text", lambda **kwargs: "")
+
+    dropped_text = (
+        "Converting documents back into a unified machine-processable format "
+        "has been a major challenge for decades due to variability in formats "
+        "and weak standardization across the industry as a whole."
+    )
     monkeypatch.setattr(
         pipeline,
-        "extract_page_text",
-        lambda **kwargs: (
-            "Converting documents back into a unified machine-processable format "
-            "has been a major challenge for decades due to variability in formats."
-        ),
+        "extract_page_blocks",
+        lambda **kwargs: [{"page_num": 1, "text": dropped_text}],
     )
     monkeypatch.setattr(
         pipeline,
         "call_vlm_chunker",
-        lambda **kwargs: {"chunks": [{"chunk_text": "Some unrelated short chunk."}]},
+        lambda **kwargs: {
+            "chunks": [
+                {
+                    "chunk_text": "Some unrelated chunk the model did produce.",
+                    "level_1_heading": "Doc Title",
+                    "level_2_heading": "Some Section",
+                }
+            ]
+        },
     )
 
-    pipeline.process_pdf(
+    output_path = pipeline.process_pdf(
         client=object(), pdf_path=Path("document.pdf"), output_dir=tmp_path, model="test-model"
     )
 
-    assert "may be missing content" in capsys.readouterr().out
+    chunks = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    recovered = [c for c in chunks if c["chunk_text"] == dropped_text]
+
+    assert len(recovered) == 1
+    assert "Auto-recovered" in recovered[0]["source_notes"]
+    # Inherits heading context from the chunk immediately before it.
+    assert recovered[0]["level_1_heading"] == "Doc Title"
+    assert recovered[0]["level_2_heading"] == "Some Section"
+    assert "Recovered 1 block" in capsys.readouterr().out
 
 
-def test_process_pdf_does_not_warn_when_coverage_is_good(tmp_path, monkeypatch, capsys):
+def test_process_pdf_does_not_recover_when_coverage_is_good(tmp_path, monkeypatch, capsys):
     text = "Docling releases two highly capable AI models for layout analysis."
     monkeypatch.setattr(pipeline, "count_pages", lambda pdf_path: 1)
     monkeypatch.setattr(pipeline, "render_pdf_pages_to_base64", lambda **kwargs: [])
     monkeypatch.setattr(pipeline, "extract_page_text", lambda **kwargs: text)
+    monkeypatch.setattr(
+        pipeline, "extract_page_blocks", lambda **kwargs: [{"page_num": 1, "text": text}]
+    )
     monkeypatch.setattr(pipeline, "call_vlm_chunker", lambda **kwargs: {"chunks": [{"chunk_text": text}]})
 
-    pipeline.process_pdf(
+    output_path = pipeline.process_pdf(
         client=object(), pdf_path=Path("document.pdf"), output_dir=tmp_path, model="test-model"
     )
 
-    assert "may be missing content" not in capsys.readouterr().out
+    chunks = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+
+    assert len(chunks) == 1  # nothing extra got appended
+    assert "Recovered" not in capsys.readouterr().out

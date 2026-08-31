@@ -11,9 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-ContentType = Literal[
-    "paragraph", "table", "boxed_section", "list", "footnote", "figure", "mixed"
-]
+ContentType = Literal["paragraph", "table", "boxed_section", "footnote", "figure", "mixed"]
 ContinuationStatus = Literal["new", "continues", "partial"]
 
 

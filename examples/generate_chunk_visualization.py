@@ -68,7 +68,6 @@ CONTENT_TYPE_COLORS = {
     "paragraph": "#3b6fd6",
     "table": "#1f9d55",
     "boxed_section": "#c9852b",
-    "list": "#8452c9",
     "footnote": "#0f9aa8",
     "figure": "#c14f8a",
     "mixed": "#666666",
