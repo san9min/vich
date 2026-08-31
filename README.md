@@ -3,10 +3,10 @@
 Layout-aware PDF parsing and chunking for RAG pipelines, powered by a
 vision-language model (VLM) instead of fixed-length text splitting.
 
-> **Status: early scaffold.** The core parsing/chunking logic is being
+> **Status: early, functional.** The core parsing/chunking logic has been
 > extracted and generalized from a private project
-> ([mafio](https://github.com/san9min/mafio)) and is not implemented here
-> yet. This README describes the intended shape of the project.
+> ([mafio](https://github.com/san9min/mafio)). It works end-to-end against
+> the OpenAI Responses API but is not yet published or widely tested.
 
 ## Why
 
@@ -22,35 +22,63 @@ directly from the page, preserving:
 - Table structure as markdown, not flattened text
 - Keywords/entities per chunk for hybrid (sparse + dense) retrieval
 
-## Planned project structure
+## Project structure
 
 ```text
 vich/
 ├── src/vich/
-│   ├── parsing/     # PDF -> page images (PyMuPDF-based rendering)
-│   ├── chunking/     # VLM prompt + chunk extraction/normalization
-│   ├── schema.py      # Chunk / output data models
-│   └── cli.py         # `vich` command-line entrypoint
+│   ├── parsing/         # PDF -> page images (PyMuPDF-based rendering)
+│   ├── chunking/        # VLM prompt + chunk extraction/normalization
+│   ├── schema.py        # Chunk / output data models (pydantic)
+│   ├── pipeline.py       # Batch PDF -> JSONL orchestration
+│   └── cli.py            # `vich` command-line entrypoint
 ├── tests/
-├── examples/           # Sample PDFs + expected output for docs
+├── examples/              # Sample PDFs + expected output for docs
 ├── pyproject.toml
 └── LICENSE (MIT)
 ```
 
-## Install (once implemented)
+## Install
 
 ```bash
 uv sync
+cp .env.example .env  # set OPENAI_API_KEY and VICH_VLM_MODEL
 ```
+
+## Usage
+
+```bash
+# Single PDF
+uv run vich parse path/to/document.pdf
+
+# Every PDF in a directory
+uv run vich parse path/to/pdf_dir --output-dir data/processed
+```
+
+Or as a library:
+
+```python
+from openai import OpenAI
+from vich import process_pdf
+
+process_pdf(
+    client=OpenAI(),
+    pdf_path=Path("document.pdf"),
+    model="gpt-4.1-mini",
+)
+```
+
+Each chunk (see `vich.schema.Chunk`) carries a 3-level heading hierarchy,
+page range, content type, table markdown (when applicable), keywords,
+entities, and a precomposed `embedding_text` ready for a vector store.
 
 ## Roadmap
 
-- [ ] Port and generalize the VLM chunking pipeline (drop domain-specific
+- [x] Port and generalize the VLM chunking pipeline (drop domain-specific
       bank/document data, keep the layout-aware chunking approach)
 - [ ] Pluggable VLM backend (OpenAI-compatible today; others later)
-- [ ] `vich parse <pdf>` CLI producing JSONL chunks
 - [ ] Docs + example PDF walkthrough
-- [ ] Tests
+- [ ] Publish to PyPI
 
 ## License
 
